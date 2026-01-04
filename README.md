@@ -121,7 +121,22 @@ const char* password = "YOUR_WIFI_PASSWORD";  // <-- Your WiFi password
 // WiFiManager wifiManager;
 ```
 
-#### 3. Enter Your WiFi Credentials
+#### 3. Install ArduinoMDNS Library
+**IMPORTANT:** You must install the ArduinoMDNS library before uploading:
+
+1. **Open Arduino IDE**
+2. **Tools → Manage Libraries** (or Ctrl+Shift+I)
+3. **Search for:** `ArduinoMDNS`
+4. **Look for:** "ArduinoMDNS by arduino-libraries"
+5. **Click "Install"** - Use latest version
+6. **Wait for installation** - Should show "Installed" status
+
+**Verification:**
+- Check **Sketch → Include Library** menu
+- **ArduinoMDNS** should appear in the list
+- Library should show in **Library Manager** as installed
+
+#### 4. Enter Your WiFi Credentials
 **Example:**
 ```cpp
 // If your WiFi network is "MyHomeWiFi" and password is "password123"
@@ -129,7 +144,7 @@ const char* ssid = "MyHomeWiFi";
 const char* password = "password123";
 ```
 
-#### 4. Upload to Arduino UNO Q
+#### 5. Upload to Arduino UNO Q
 1. Connect Arduino UNO Q to your computer
 2. Select "Arduino UNO Q" as board
 3. Upload the modified sketch
