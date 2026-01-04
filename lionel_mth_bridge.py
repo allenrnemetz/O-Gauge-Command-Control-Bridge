@@ -35,11 +35,12 @@ logger = logging.getLogger(__name__)
 
 class LionelMTHBridge:
     def __init__(self):
-        self.lionel_port = '/dev/ttyUSB0'  # FTDI adapter
-        self.mcu_port = '/dev/ttyHS1'      # Arduino MCU
+        self.lionel_port = '/dev/ttyUSB0'  # FTDI adapter for SER2
+        self.mcu_port = '/dev/ttymxc3'     # Internal UART to MCU on Arduino UNO Q
         self.mth_devices = ['192.168.0.100', '192.168.0.102']
         self.lionel_serial = None
         self.mcu_serial = None
+        self.mcu_connected = False
         self.running = False
         self.auto_reconnect = True
         self.connection_check_interval = 5  # seconds
@@ -101,7 +102,7 @@ class LionelMTHBridge:
                         logger.error("❌ Failed to reconnect to SER2")
                         
                 # Check if MCU connection is still alive  
-                if self.mcu_serial is None or not self.mcu_serial.is_open:
+                if self.mcu_serial and not self.mcu_serial.is_open:
                     logger.warning("⚠️ MCU connection lost, attempting reconnect...")
                     self.connect_mcu()
                 
@@ -109,6 +110,15 @@ class LionelMTHBridge:
                 logger.error(f"❌ Connection monitor error: {e}")
                 
             time.sleep(self.connection_check_interval)
+    
+    def _is_mcu_connected(self):
+        """Check if MCU connection is alive"""
+        if not self.mcu_serial:
+            return False
+        try:
+            return self.mcu_serial.is_open
+        except:
+            return False
     
     def start_connection_monitor(self):
         """Start the connection monitoring thread"""
@@ -134,23 +144,54 @@ class LionelMTHBridge:
             return False
     
     def connect_mcu(self):
-        """Connect to Arduino MCU via Arduino Router"""
-        try:
-            # Stop Arduino Router to use MCU directly
-            subprocess.run(['sudo', 'systemctl', 'stop', 'arduino-router'], 
-                         capture_output=True)
-            time.sleep(2)
-            
-            self.mcu_serial = serial.Serial(
-                self.mcu_port, 
-                baudrate=115200, 
-                timeout=1
-            )
-            logger.info(f"✅ Connected to MCU on {self.mcu_port}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ MCU connection failed: {e}")
-            return False
+        """Connect to Arduino MCU via arduino-router Unix socket"""
+        import platform
+        
+        system = platform.system()
+        
+        if system == 'Linux':
+            # On Arduino UNO Q, use the arduino-router Unix socket
+            socket_path = '/var/run/arduino-router.sock'
+            try:
+                import socket as sock
+                self.mcu_socket = sock.socket(sock.AF_UNIX, sock.SOCK_STREAM)
+                self.mcu_socket.connect(socket_path)
+                self.mcu_socket.settimeout(1.0)
+                self.mcu_connected = True
+                logger.info(f"✅ Connected to Arduino MCU via arduino-router ({socket_path})")
+                return True
+            except FileNotFoundError:
+                logger.info(f"Arduino router socket not found at {socket_path}")
+            except PermissionError:
+                logger.info(f"Permission denied for {socket_path} - try running as root")
+            except Exception as e:
+                logger.info(f"Arduino router connection failed: {e}")
+        
+        # Fallback: try direct serial (if arduino-router is stopped)
+        logger.info("Trying direct serial connection as fallback...")
+        import glob
+        
+        if system == 'Windows':
+            possible_ports = [f'COM{i}' for i in range(1, 20)]
+        elif system == 'Linux':
+            possible_ports = glob.glob('/dev/ttyUSB*') + glob.glob('/dev/ttyACM*')
+        else:
+            possible_ports = glob.glob('/dev/tty.usbserial*') + glob.glob('/dev/tty.usbmodem*')
+        
+        for port in possible_ports:
+            try:
+                self.mcu_serial = serial.Serial(port, baudrate=115200, timeout=1)
+                self.mcu_connected = True
+                self.mcu_port = port
+                logger.info(f"✅ Connected to Arduino MCU via serial ({port})")
+                return True
+            except:
+                continue
+        
+        logger.info(f"MCU connection not available on {system}")
+        logger.info("💡 On Arduino UNO Q, make sure arduino-router service is running")
+        self.mcu_connected = False
+        return False
     
     def parse_tmcc_packet(self, packet):
         """Parse TMCC packet and convert to MTH command"""
@@ -197,10 +238,11 @@ class LionelMTHBridge:
         return None
     
     def send_to_mcu(self, command):
-        """Send command to Arduino MCU"""
-        if not self.mcu_serial:
+        """Send command to Arduino MCU via arduino-router socket or serial"""
+        if not self.mcu_connected:
+            logger.debug("MCU not connected - command not sent")
             return False
-        
+            
         try:
             with self.mcu_lock:
                 # Get command type code
@@ -208,13 +250,12 @@ class LionelMTHBridge:
                 
                 # Handle different value types
                 if command['type'] == 'speed':
-                    cmd_value = command['value']  # Speed is 0-31
+                    cmd_value = command['value']
                 elif command['type'] == 'engine':
                     cmd_value = 1 if command['value'] == 'start' else 0
                 elif command['type'] == 'direction':
                     cmd_value = 1 if command['value'] == 'forward' else 0
                 elif command['type'] in ['function', 'smoke', 'pfa']:
-                    # Convert string values to codes
                     value_map = {
                         'horn': 1, 'bell': 2,
                         'increase': 1, 'decrease': 2, 'on': 3, 'off': 4,
@@ -222,19 +263,28 @@ class LionelMTHBridge:
                     }
                     cmd_value = value_map.get(command['value'], 0)
                 elif command['type'] == 'protowhistle':
-                    # ProtoWhistle commands use value field directly
                     cmd_value = command['value']
                 elif command['type'] == 'wled':
-                    # WLED commands use engine number directly
                     cmd_value = command['value']
                 else:
                     cmd_value = 0
                 
-                # Format command packet: [0xAA, type_code, value, 0xFF]
-                cmd_bytes = bytes([0xAA, cmd_type_code, cmd_value, 0xFF])
-                self.mcu_serial.write(cmd_bytes)
-                logger.debug(f"Sent to MCU: {cmd_bytes.hex()}")
+                # Format command string
+                cmd_string = f"CMD:{cmd_type_code}:{cmd_value}\n"
+                
+                # Send via socket or serial
+                if hasattr(self, 'mcu_socket') and self.mcu_socket:
+                    self.mcu_socket.send(cmd_string.encode())
+                    logger.debug(f"Sent to MCU via socket: {cmd_string.strip()}")
+                elif hasattr(self, 'mcu_serial') and self.mcu_serial:
+                    self.mcu_serial.write(cmd_string.encode())
+                    logger.debug(f"Sent to MCU via serial: {cmd_string.strip()}")
+                else:
+                    logger.debug("No MCU connection available")
+                    return False
+                    
                 return True
+                
         except Exception as e:
             logger.error(f"MCU send error: {e}")
             return False
@@ -344,6 +394,8 @@ class LionelMTHBridge:
         # Try MCU connection
         if not self.connect_mcu():
             logger.warning("⚠️ MCU connection failed, continuing with MTH only...")
+            logger.info("💡 Note: MCU connection only works on actual Arduino UNO Q hardware")
+            logger.info("💡 In WSL/testing, MCU connection is expected to fail")
         
         self.running = True
         
@@ -375,13 +427,6 @@ class LionelMTHBridge:
                 self.mcu_serial.close()
             except Exception as e:
                 logger.warning(f"Error closing MCU serial: {e}")
-        
-        # Restart Arduino Router
-        try:
-            subprocess.run(['sudo', 'systemctl', 'start', 'arduino-router'], 
-                         capture_output=True)
-        except Exception as e:
-            logger.debug(f"Could not restart Arduino Router: {e}")
         
         logger.info("✅ Bridge stopped")
     

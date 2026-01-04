@@ -27,9 +27,12 @@
  * - Real-time train control and status monitoring
  */
 
+// Arduino App Lab compatibility
+#include <Arduino.h>
 #include <WiFiS3.h>
 #include <WiFiUdp.h>
 #include <ArduinoMDNS.h>
+#include <Monitor.h>  // Required for App Lab Serial Monitor
 #include "speck_functions.h"
 
 // Command constants (must match MPU)
@@ -78,6 +81,9 @@ const unsigned long CONNECTION_RETRY_INTERVAL = 5000; // 5 seconds
 // mDNS instance
 MDNS mdns;
 
+// MPU-MCU communication via internal serial (Serial1 on Arduino UNO Q)
+// Note: Serial is for USB/Monitor, Serial1 is for MPU communication
+
 // Status LED
 #define STATUS_LED LED_BUILTIN
 
@@ -91,9 +97,10 @@ SPECK_TYPE round_keys[SPECK_ROUNDS];
 bool encryption_enabled = true;
 
 void setup() {
-  // Initialize serial communication with MPU
+  // Initialize communication with MPU and App Lab Monitor
   Serial.begin(115200);
-  Serial.println("=== MTH WTIU Handler Starting ===");
+  Monitor.begin();  // Initialize App Lab Monitor
+  Monitor.println("=== MTH WTIU Handler Starting ===");
   
   // Initialize status LED
   pinMode(STATUS_LED, OUTPUT);
@@ -107,26 +114,33 @@ void setup() {
     delay(200);
   }
   
-  Serial.println("MCU initialized - LED test complete");
+  Monitor.println("MCU initialized - LED test complete");
   
   // Initialize WiFi
   initializeWiFi();
   
   // Initialize Speck encryption
   speck_expand(key, round_keys);
-  Serial.println("Speck encryption initialized");
+  Monitor.println("Speck encryption initialized");
+  
+  // Initialize Serial1 for MPU-MCU communication (internal UART)
+  Serial1.begin(115200);
+  Monitor.println("Serial1 initialized for MPU communication");
   
   // Discover and connect to MTH WTIU using mDNS
   if (!discoverWTIU()) {
-    Serial.println("Failed to find WTIU on startup, will retry in background");
+    Monitor.println("Failed to find WTIU on startup, will retry in background");
   }
   
-  Serial.println("=== MTH WTIU Handler Ready ===");
-  Serial.println("ProtoWhistle support enabled");
+  Monitor.println("=== MTH WTIU Handler Ready ===");
+  Monitor.println("ProtoWhistle support enabled");
 }
 
 void loop() {
-  // Check for commands from MPU
+  // Check for commands from MPU via Serial1 (internal UART)
+  checkSerialCommands();
+  
+  // Check for commands from USB Serial (fallback/testing)
   if (Serial.available()) {
     receiveCommandFromMPU();
   }
@@ -138,97 +152,122 @@ void loop() {
 }
 
 void initializeWiFi() {
-  Serial.println("Initializing WiFi...");
+  Monitor.println("=== Starting WiFi Connection ===");
+  Monitor.print("Connecting to network: ");
+  Monitor.println(ssid);
   
   WiFi.begin(ssid, password);
   
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
     delay(500);
-    Serial.print(".");
+    Monitor.print(".");
     attempts++;
   }
   
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi connected");
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
+    Monitor.println("\n✅ WiFi connected successfully!");
+    Monitor.print("IP address: ");
+    Monitor.println(WiFi.localIP());
+    Monitor.print("Signal strength (RSSI): ");
+    Monitor.print(WiFi.RSSI());
+    Monitor.println(" dBm");
     
     // Initialize mDNS for WTIU discovery
     if (mdns.begin("lionel-mth-bridge")) {
-      Serial.println("mDNS responder started");
+      Monitor.println("✅ mDNS responder started successfully");
     } else {
-      Serial.println("Error setting up mDNS responder");
+      Monitor.println("⚠️ Error setting up mDNS responder");
     }
   } else {
-    Serial.println("\nWiFi connection failed");
+    Monitor.println("\n❌ WiFi connection failed!");
+    Monitor.print("Final status: ");
+    Monitor.println(WiFi.status());
   }
 }
 
 bool discoverWTIU() {
-  Serial.println("Searching for MTH WTIU devices via mDNS...");
+  Monitor.println("=== Starting WTIU Discovery ===");
+  Monitor.println("Searching for MTH WTIU devices via mDNS...");
   
   // Use ArduinoMDNS library for service discovery
   int n = mdns.queryService("wtiu", "tcp");
+  Monitor.print("mDNS query completed. Found ");
+  Monitor.print(n);
+  Monitor.println(" WTIU service(s)");
   
   if (n == 0) {
-    Serial.println("No WTIU services found");
+    Monitor.println("❌ No WTIU services found");
+    Monitor.println("💡 Troubleshooting tips:");
+    Monitor.println("   - Ensure MTH WTIU is powered on");
+    Monitor.println("   - Check WTIU is on same 2.4GHz WiFi network");
+    Monitor.println("   - Verify WTIU is advertising mDNS services");
     return false;
   }
   
-  Serial.print("Found ");
-  Serial.print(n);
-  Serial.println(" WTIU service(s):");
-  
+  Monitor.println("🎯 WTIU services discovered:");
   for (int i = 0; i < n; i++) {
-    Serial.print("  ");
-    Serial.print(i + 1);
-    Serial.print(": ");
-    Serial.print(mdns.hostname(i));
-    Serial.print(" (");
-    Serial.print(mdns.IP(i));
-    Serial.print(":");
-    Serial.print(mdns.port(i));
-    Serial.println(")");
+    Monitor.print("  Service ");
+    Monitor.print(i + 1);
+    Monitor.print(": ");
+    Monitor.print(mdns.hostname(i));
+    Monitor.print(" (");
+    Monitor.print(mdns.IP(i));
+    Monitor.print(":");
+    Monitor.print(mdns.port(i));
+    Monitor.println(")");
     
     // Try to connect to this WTIU
     strcpy(wtiu_host, mdns.IP(i).toString().c_str());
     wtiu_port_dynamic = mdns.port(i);
     
+    Monitor.print("🔗 Attempting connection to ");
+    Monitor.print(wtiu_host);
+    Monitor.print(":");
+    Monitor.println(wtiu_port_dynamic);
+    
     if (connectToWTIU()) {
-      Serial.print("✅ Connected to WTIU: ");
-      Serial.print(wtiu_host);
-      Serial.print(":");
-      Serial.println(wtiu_port_dynamic);
+      Monitor.print("✅ Successfully connected to WTIU: ");
+      Monitor.print(wtiu_host);
+      Monitor.print(":");
+      Monitor.println(wtiu_port_dynamic);
       return true;
+    } else {
+      Monitor.println("❌ Connection failed, trying next WTIU...");
     }
   }
   
+  Monitor.println("❌ Could not connect to any WTIU devices");
   return false;
 }
 
 bool connectToWTIU() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi not connected - cannot connect to WTIU");
+    Monitor.println("❌ WiFi not connected - cannot connect to WTIU");
     return false;
   }
   
-  Serial.print("Connecting to MTH WTIU at ");
-  Serial.print(wtiu_host);
-  Serial.print(":");
-  Serial.println(wtiu_port_dynamic);
+  Monitor.print("🔗 Connecting to MTH WTIU at ");
+  Monitor.print(wtiu_host);
+  Monitor.print(":");
+  Monitor.println(wtiu_port_dynamic);
   
   if (wtiu_client.connect(wtiu_host, wtiu_port_dynamic)) {
     wtiu_connected = true;
-    Serial.println("Connected to MTH WTIU");
+    Monitor.println("✅ Successfully connected to MTH WTIU!");
+    Monitor.print("📡 WTIU connection details: ");
+    Monitor.print(wtiu_host);
+    Monitor.print(":");
+    Monitor.println(wtiu_port_dynamic);
     digitalWrite(STATUS_LED, HIGH); // Turn on LED when connected
-    
-    // Send initial handshake if needed
-    delay(100);
     return true;
   } else {
     wtiu_connected = false;
-    Serial.println("Failed to connect to MTH WTIU");
+    Monitor.println("❌ Failed to connect to MTH WTIU");
+    Monitor.print("⚠️ Connection error details: ");
+    Monitor.print(wtiu_host);
+    Monitor.print(":");
+    Monitor.println(wtiu_port_dynamic);
     digitalWrite(STATUS_LED, LOW);
     return false;
   }
@@ -245,12 +284,45 @@ void maintainWTIUConnection() {
     
     unsigned long current_time = millis();
     if (current_time - last_connection_attempt >= CONNECTION_RETRY_INTERVAL) {
-      Serial.println("Attempting to rediscover and reconnect to MTH WTIU...");
+      Monitor.println("Attempting to rediscover and reconnect to MTH WTIU...");
       last_connection_attempt = current_time;
       
       // Rediscover WTIU
       if (!discoverWTIU()) {
-        Serial.println("Failed to rediscover WTIU, will retry later");
+        Monitor.println("Failed to rediscover WTIU, will retry later");
+      }
+    }
+  }
+}
+
+void checkSerialCommands() {
+  // Check for commands from MPU via Serial1 (internal UART)
+  if (Serial1.available()) {
+    String command = Serial1.readStringUntil('\n');
+    command.trim();
+    
+    if (command.startsWith("CMD:")) {
+      // Parse command format: "CMD:type:value"
+      int firstColon = command.indexOf(':');
+      int secondColon = command.indexOf(':', firstColon + 1);
+      
+      if (firstColon > 0 && secondColon > firstColon) {
+        int cmd_type = command.substring(firstColon + 1, secondColon).toInt();
+        int cmd_value = command.substring(secondColon + 1).toInt();
+        
+        // Create command packet
+        CommandPacket cmd;
+        cmd.command_type = cmd_type;
+        cmd.engine_number = 1; // Default engine number
+        cmd.value = cmd_value;
+        cmd.bool_value = (cmd_value > 0);
+        
+        Monitor.print("Received Serial1 command: type=");
+        Monitor.print(cmd.command_type);
+        Monitor.print(", value=");
+        Monitor.println(cmd.value);
+        
+        executeMTHCommand(&cmd);
       }
     }
   }
@@ -275,15 +347,15 @@ void executeMTHCommand(CommandPacket* cmd) {
   char mth_cmd[32];
   bool command_sent = false;
   
-  // Send to Serial for debugging
-  Serial.print("Executing command: type=");
-  Serial.print(cmd->command_type);
-  Serial.print(", engine=");
-  Serial.print(cmd->engine_number);
-  Serial.print(", value=");
-  Serial.print(cmd->value);
-  Serial.print(", bool=");
-  Serial.println(cmd->bool_value);
+  // Send to Monitor for debugging
+  Monitor.print("Executing command: type=");
+  Monitor.print(cmd->command_type);
+  Monitor.print(", engine=");
+  Monitor.print(cmd->engine_number);
+  Monitor.print(", value=");
+  Monitor.print(cmd->value);
+  Monitor.print(", bool=");
+  Monitor.println(cmd->bool_value);
   
   switch (cmd->command_type) {
     case CMD_ENGINE_SELECT:
@@ -328,7 +400,7 @@ void executeMTHCommand(CommandPacket* cmd) {
         }
         command_sent = true;
       } else {
-        Serial.println("Regular whistle ignored - ProtoWhistle is enabled");
+        Monitor.println("Regular whistle ignored - ProtoWhistle is enabled");
       }
       break;
       
@@ -339,11 +411,11 @@ void executeMTHCommand(CommandPacket* cmd) {
         if (cmd->bool_value) {
           sendMTHCommand("ab20"); // Enable protowhistle
           protowhistle_enabled = true;
-          Serial.println("ProtoWhistle ENABLED");
+          Monitor.println("ProtoWhistle ENABLED");
         } else {
           sendMTHCommand("ab21"); // Disable protowhistle
           protowhistle_enabled = false;
-          Serial.println("ProtoWhistle DISABLED");
+          Monitor.println("ProtoWhistle DISABLED");
         }
         command_sent = true;
       } else if (cmd->value == 1) {
@@ -351,10 +423,10 @@ void executeMTHCommand(CommandPacket* cmd) {
         if (protowhistle_enabled) {
           if (cmd->bool_value) {
             sendMTHCommand("w2"); // Quill the whistle
-            Serial.println("ProtoWhistle QUILL ON");
+            Monitor.println("ProtoWhistle QUILL ON");
           } else {
             sendMTHCommand("bFFFD"); // Stop quilling
-            Serial.println("ProtoWhistle QUILL OFF");
+            Monitor.println("ProtoWhistle QUILL OFF");
           }
           command_sent = true;
         }
@@ -363,10 +435,10 @@ void executeMTHCommand(CommandPacket* cmd) {
         protowhistle_enabled = cmd->bool_value;
         if (protowhistle_enabled) {
           sendMTHCommand("ab20"); // Enable protowhistle
-          Serial.println("ProtoWhistle TOGGLED ON");
+          Monitor.println("ProtoWhistle TOGGLED ON");
         } else {
           sendMTHCommand("ab21"); // Disable protowhistle
-          Serial.println("ProtoWhistle TOGGLED OFF");
+          Monitor.println("ProtoWhistle TOGGLED OFF");
         }
         command_sent = true;
       } else if (cmd->value >= 10 && cmd->value <= 13) {
@@ -375,8 +447,8 @@ void executeMTHCommand(CommandPacket* cmd) {
         char pitch_cmd[10];
         snprintf(pitch_cmd, sizeof(pitch_cmd), "ab%d", protowhistle_pitch + 26);
         sendMTHCommand(pitch_cmd);
-        Serial.print("ProtoWhistle pitch set to ");
-        Serial.println(protowhistle_pitch);
+        Monitor.print("ProtoWhistle pitch set to ");
+        Monitor.println(protowhistle_pitch);
         command_sent = true;
       }
       break;
@@ -389,9 +461,9 @@ void executeMTHCommand(CommandPacket* cmd) {
         command_sent = true;
       } else {
         // WLED off - no MTH command needed, just log
-        Serial.print("WLED Engine ");
-        Serial.print(cmd->engine_number);
-        Serial.println(" OFF");
+        Monitor.print("WLED Engine ");
+        Monitor.print(cmd->engine_number);
+        Monitor.println(" OFF");
         command_sent = true;
       }
       break;
@@ -407,8 +479,8 @@ void executeMTHCommand(CommandPacket* cmd) {
       break;
       
     default:
-      Serial.print("Unknown command type: ");
-      Serial.println(cmd->command_type);
+      Monitor.print("Unknown command type: ");
+      Monitor.println(cmd->command_type);
       break;
   }
   
@@ -416,22 +488,24 @@ void executeMTHCommand(CommandPacket* cmd) {
   CommandPacket response;
   response.command_type = cmd->command_type;
   response.engine_number = cmd->engine_number;
-  response.value = command_sent ? 1 : 0; // Success/failure
+  response.value = cmd->value;
   response.bool_value = cmd->bool_value;
   
-  Serial.write((uint8_t*)&response, sizeof(CommandPacket));
-  Serial.flush();
+  // Send response via Serial1 to MPU
+  Serial1.println("ACK");
   
   if (command_sent) {
-    Serial.println("Command sent successfully");
+    Monitor.print("✅ Command executed: ");
+    Monitor.println(mth_cmd);
   } else {
-    Serial.println("Command failed");
+    Monitor.println("❌ Command not executed");
   }
 }
 
 void sendMTHCommand(const char* cmd) {
   if (!wtiu_connected || !wtiu_client.connected()) {
-    Serial.print("Cannot send command - WTIU not connected: ");
+    Monitor.print("Cannot send command - WTIU not connected: ");
+    Monitor.println(cmd);
     Serial.println(cmd);
     return;
   }
