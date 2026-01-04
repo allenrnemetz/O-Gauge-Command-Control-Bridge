@@ -23,7 +23,7 @@ This project creates a bridge between Lionel Base 3 systems and MTH DCS systems 
 - **MCU (Sub-processor)**: Runs C++ code to handle MTH WTIU wireless communication
 
 ## Features
-- Control MTH trains using Lionel Cab-1, Cab-1L, Cab-2, or Cab-3 remotes
+- Control MTH trains using Lionel Cab-1L, Cab-2, or Cab-3 remotes
 - **Smart Whistle**: Whistle button automatically uses regular whistle or protowhistle based on mode
 - **Direct Engine Mapping**: Lionel engine 1-99 maps directly to MTH engine 1-99 (no offset)
 - **Fine Speed Control**: Ultra-fine low-speed control (1,3,5,10 Smph for first 4 steps)
@@ -111,27 +111,27 @@ python3 lionel_mth_bridge.py
 ### Engine Control
 
 #### Engine Startup (All Cab Remotes):
-- **AUX 1 button** on Cab-1, Cab-2, and Cab-3 remotes
+- **AUX 1 button** on Cab-1L, Cab-2, and Cab-3 remotes
 - **MASTER KEY → ENGINE START** on Cab-2/Cab-3 (additional method)
 - **ENGINE START button** on Cab-2 (additional method)
 - Sends TMCC packet: `FE 01 00`
 - Translates to MTH: `/control/engine/start`
 
 #### Engine Shutdown (All Cab Remotes):
-- **Number 5 key** on Cab-1, Cab-2, and Cab-3 keypads
+- **Number 5 key** on Cab-1L, Cab-2, and Cab-3 keypads
 - **MASTER KEY → ENGINE STOP** on Cab-2/Cab-3 (additional method)  
 - **ENGINE STOP button** on Cab-2 (additional method)
 - Sends TMCC packet: `FE 01 FF`
 - Translates to MTH: `/control/engine/stop`
 
 #### Remote-Specific Controls:
-- **Cab-1**: AUX 1 = Start, Number 5 = Stop (basic controls)
+- **Cab-1L**: AUX 1 = Start, Number 5 = Stop (basic controls)
 - **Cab-2**: AUX 1 + Number 5 + ENGINE START/STOP buttons + MASTER KEY wheel
 - **Cab-3**: AUX 1 + Number 5 + MASTER KEY wheel (enhanced power commands)
 
 ### Smoke Control
 
-#### Cab-1 Smoke Control:
+#### Cab-1L Smoke Control:
 - **Number 8 key**: Decrease smoke intensity (Max → Medium → Low → Off)
 - **Number 9 key**: Increase smoke intensity (Off → Low → Medium → Max)
 - Requires smoke to be set to maximum first for step control
@@ -157,7 +157,7 @@ python3 lionel_mth_bridge.py
 ### PFA (Proto-Sound Effects Animation) Control
 
 #### Cab Chatter to PFA:
-- **CAB CHATTER button** (Cab-2/Cab-3) or **AUX button** (Cab-1)
+- **CAB CHATTER button** (Cab-2/Cab-3) or **AUX button** (Cab-1L)
 - Toggles PFA cab chatter effects on/off
 - **TMCC Packet**: `FE 00 16` → `/control/pfa/cab_chatter`
 
@@ -167,7 +167,7 @@ python3 lionel_mth_bridge.py
 - **TMCC Packet**: `FE 00 17` → `/control/pfa/towercom`
 
 #### PFA Control by Remote:
-- **Cab-1**: AUX buttons may trigger cab chatter (varies by setup)
+- **Cab-1L**: AUX buttons may trigger cab chatter (varies by setup)
 - **Cab-2**: Dedicated CAB CHATTER and TOWERCOM buttons
 - **Cab-3**: Dedicated CAB CHATTER and TOWERCOM buttons
 

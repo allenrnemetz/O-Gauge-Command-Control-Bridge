@@ -66,15 +66,15 @@ def test_ftdi_connection():
                                 elif data_field == 0x1D:
                                     print("   → Bell")
                                 elif data_field == 0x18:
-                                    print("   → 💨 Smoke Increase (Number 9 on Cab-1, SMOKE INCREASE on Cab-2/3)")
+                                    print("   → 💨 Smoke Increase (Number 9 on Cab-1L, SMOKE INCREASE on Cab-2/3)")
                                 elif data_field == 0x19:
-                                    print("   → 💨 Smoke Decrease (Number 8 on Cab-1, SMOKE DECREASE on Cab-2/3)")
+                                    print("   → 💨 Smoke Decrease (Number 8 on Cab-1L, SMOKE DECREASE on Cab-2/3)")
                                 elif data_field == 0x1A:
                                     print("   → 💨 Smoke On (SMOKE ON on Cab-2/3)")
                                 elif data_field == 0x1B:
                                     print("   → 💨 Smoke Off (SMOKE OFF on Cab-2/3)")
                                 elif data_field == 0x16:
-                                    print("   → 🗣️ Cab Chatter (CAB CHATTER on Cab-2/3, AUX on Cab-1)")
+                                    print("   → 🗣️ Cab Chatter (CAB CHATTER on Cab-2/3, AUX on Cab-1L)")
                                 elif data_field == 0x17:
                                     print("   → 📢 TowerCom (TOWERCOM on Cab-2/3)")
                             elif cmd_field == 0x03:
