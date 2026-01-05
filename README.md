@@ -199,7 +199,7 @@ Commands between MPU and MCU use: `CMD:type:value`
 | `5` | PFA | 1=cab_chatter, 2=towercom |
 | `6` | Engine | 0=stop, 1=start |
 | `8` | ProtoWhistle | Various |
-| `9` | WLED | Engine number |
+| `9` | Engine number | MTHEngine number with offset |
 
 ### Examples
 
