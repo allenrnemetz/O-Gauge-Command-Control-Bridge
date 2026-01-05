@@ -77,6 +77,28 @@ class LionelMTHBridge:
         # TMCC state
         self.current_lionel_engine = 0
         
+        # TMCC speed tracking per engine
+        self.engine_speeds = {}  # {engine_number: current_speed_0_to_31}
+        
+        # TMCC direction tracking per engine
+        self.engine_directions = {}  # {engine_number: current_direction}
+        
+        # TMCC quillable whistle state
+        self.quillable_whistle_on = False
+        self.whistle_pitch = 1  # 1-5 for different pitches
+        
+        # TMCC button state tracking
+        self.button_states = {}  # {button_name: is_pressed}
+        self.last_button_release = {}  # {button_name: timestamp}
+        
+        # TMCC command debouncing
+        self.last_command_time = {}  # {engine_number: last_command_timestamp}
+        self.debounce_delay = 0.5  # seconds between same commands
+        
+        # Whistle hold-to-sound timeout
+        self.last_whistle_time = 0  # Last time whistle packet was received
+        self.whistle_timeout = 0.3  # Seconds without packets before turning off whistle
+        
         # WTIU session key (from H5 response)
         self.wtiu_session_key = None
         
@@ -126,6 +148,14 @@ class LionelMTHBridge:
                 if self.mcu_serial and not self.mcu_serial.is_open:
                     logger.warning("⚠️ MCU connection lost, attempting reconnect...")
                     self.connect_mcu()
+                
+                # Check if MTH WTIU connection is still alive
+                if not self.mth_connected or not self.mth_socket:
+                    logger.warning("⚠️ MTH WTIU connection lost, attempting reconnect...")
+                    if self.connect_mth():
+                        logger.info("✅ MTH WTIU reconnected successfully!")
+                    else:
+                        logger.warning("⚠️ MTH WTIU reconnect failed, will retry...")
                 
             except Exception as e:
                 logger.error(f"❌ Connection monitor error: {e}")
@@ -247,21 +277,42 @@ class LionelMTHBridge:
             if data_field == 0x00:  # Forward (00000)
                 return {'type': 'direction', 'value': 'forward'}
             elif data_field == 0x01:  # Toggle Direction (00001)
-                return {'type': 'direction', 'value': 'toggle'}
+                # Handle direction toggle here with debouncing
+                current_time = time.time()
+                last_time = self.last_command_time.get("direction_toggle", 0)
+                
+                if current_time - last_time > self.debounce_delay:
+                    current_dir = self.engine_directions.get(self.current_lionel_engine, 'forward')
+                    new_dir = 'reverse' if current_dir == 'forward' else 'forward'
+                    self.engine_directions[self.current_lionel_engine] = new_dir
+                    self.last_command_time["direction_toggle"] = current_time
+                    logger.info(f"🔧 DEBUG: Direction toggled from {current_dir} to {new_dir}")
+                    return {'type': 'direction', 'value': new_dir}
+                else:
+                    logger.info(f"🔧 DEBUG: Direction toggle debounced (too soon)")
+                    return None
             elif data_field == 0x03:  # Reverse (00011)
                 return {'type': 'direction', 'value': 'reverse'}
             elif data_field == 0x04:  # Boost Speed (00100)
                 return {'type': 'speed', 'value': 'boost'}
+            elif data_field == 0x05:  # Front Coupler (00101)
+                logger.info(f"🔧 DEBUG: Front Coupler detected")
+                return {'type': 'function', 'value': 'front_coupler'}
+            elif data_field == 0x06:  # Rear Coupler (00110)
+                logger.info(f"🔧 DEBUG: Rear Coupler detected")
+                return {'type': 'function', 'value': 'rear_coupler'}
             elif data_field == 0x07:  # Brake Speed (00111)
                 return {'type': 'speed', 'value': 'brake'}
             elif data_field == 0x08:  # Aux1 Off (01000)
                 return {'type': 'function', 'value': 'aux1_off'}
             elif data_field == 0x09:  # Aux1 Option 1 (01001) - Map to startup for your remote
                 return {'type': 'engine', 'value': 'startup'}
-            elif data_field == 0x0A:  # Aux1 Option 2 (01010)
-                return {'type': 'function', 'value': 'aux1_option2'}
-            elif data_field == 0x0B:  # Aux1 On (01011)
-                return {'type': 'engine', 'value': 'startup'}
+            elif data_field == 0x0A:  # Aux1 Option 2 (01010) - Button 1 = Volume UP
+                logger.info(f"🔧 DEBUG: Button 1 - Volume UP detected")
+                return {'type': 'function', 'value': 'volume_up'}
+            elif data_field == 0x0B:  # Aux1 On (01011) - Button 4 = Volume DOWN
+                logger.info(f"🔧 DEBUG: Button 4 - Volume DOWN detected")
+                return {'type': 'function', 'value': 'volume_down'}
             elif data_field == 0x0C:  # Aux2 Off (01100)
                 return {'type': 'function', 'value': 'aux2_off'}
             elif data_field == 0x0D:  # Aux2 Option 1 (01101)
@@ -270,48 +321,190 @@ class LionelMTHBridge:
                 return {'type': 'function', 'value': 'aux2_option2'}
             elif data_field == 0x0F:  # Aux2 On (01111)
                 return {'type': 'function', 'value': 'aux2_on'}
+            elif data_field == 0x10:  # Aux2 Option 3 (10000) - Quillable Whistle Toggle
+                # Toggle quillable whistle state
+                current_state = getattr(self, 'quillable_whistle_on', False)
+                new_state = not current_state
+                self.quillable_whistle_on = new_state
+                if new_state:
+                    logger.info(f"🔧 DEBUG: Quillable whistle ON (toggled)")
+                    return {'type': 'function', 'value': 'whistle_on'}
+                else:
+                    logger.info(f"🔧 DEBUG: Quillable whistle OFF (toggled)")
+                    return {'type': 'function', 'value': 'whistle_off'}
+            elif data_field == 0x12:  # Aux2 Option 5 (10010) - Button 9 = Smoke ON
+                logger.info(f"🔧 DEBUG: Button 9 - Smoke ON detected")
+                return {'type': 'function', 'value': 'smoke_on'}
+            elif data_field == 0x13:  # Aux2 Option 6 (10011) - Button 8 = Smoke OFF
+                logger.info(f"🔧 DEBUG: Button 8 - Smoke OFF detected")
+                return {'type': 'function', 'value': 'smoke_off'}
+            elif data_field == 0x14:  # (10100) - Button 4 = Volume DOWN
+                logger.info(f"🔧 DEBUG: Button 4 - Volume DOWN detected")
+                return {'type': 'function', 'value': 'volume_down'}
+            elif data_field == 0x15:  # Shutdown (10101)
+                return {'type': 'engine', 'value': 'shutdown'}
+            elif data_field == 0x18:  # (11000) - Smoke Off
+                logger.info(f"🔧 DEBUG: Smoke OFF detected")
+                return {'type': 'smoke', 'value': 'off'}
+            elif data_field == 0x19:  # (11001) - Smoke On
+                logger.info(f"🔧 DEBUG: Smoke ON detected")
+                return {'type': 'smoke', 'value': 'on'}
+            elif data_field == 0x11:  # (10001) - Button 1 = Volume UP
+                logger.info(f"🔧 DEBUG: Button 1 - Volume UP detected")
+                return {'type': 'function', 'value': 'volume_up'}
+            elif data_field == 0x1C:  # Horn (11100) - Whistle button - HOLD MODE
+                # Update last whistle time for timeout detection
+                self.last_whistle_time = time.time()
+                
+                if not self.button_states.get('horn', False):
+                    # First press - turn whistle on
+                    self.button_states['horn'] = True
+                    logger.info(f"🔧 DEBUG: Horn button PRESSED - Whistle ON")
+                    return {'type': 'function', 'value': 'horn'}
+                else:
+                    # Still holding - keep whistle on, don't send duplicate commands
+                    logger.info(f"🔧 DEBUG: Horn button HELD - Whistle staying ON")
+                    return None
+            elif data_field == 0x1D:  # Bell (11101) - Button press - TOGGLE MODE
+                current_time = time.time()
+                last_time = self.last_command_time.get("bell_toggle", 0)
+                
+                if current_time - last_time > self.debounce_delay:
+                    # Toggle bell state
+                    current_state = self.button_states.get('bell', False)
+                    new_state = not current_state
+                    self.button_states['bell'] = new_state
+                    self.last_command_time["bell_toggle"] = current_time
+                    
+                    if new_state:
+                        logger.info(f"🔧 DEBUG: Bell button TOGGLED ON")
+                        return {'type': 'function', 'value': 'bell'}
+                    else:
+                        logger.info(f"🔧 DEBUG: Bell button TOGGLED OFF")
+                        return {'type': 'function', 'value': 'bell_off'}
+                else:
+                    logger.info(f"🔧 DEBUG: Bell button debounced (too soon)")
+                    return None
+            
+            # Direction commands
+            elif data_field in [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6]:
+                return {'type': 'direction', 'value': 'forward'}
+            elif data_field in [0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE]:
+                return {'type': 'direction', 'value': 'reverse'}
                 
         elif cmd_field == 0x02:  # Relative speed commands (binary 10 - bit 6 set)
             if 0x00 <= data_field <= 0x1F:  # Relative speed D (0-31)
-                # Convert relative speed: 0xA=+5, 0x9=+4, ..., 0x5=0, ..., 0x0=-5
-                if data_field == 0x0A:  # +5
-                    speed_change = 5
-                elif data_field == 0x09:  # +4
-                    speed_change = 4
-                elif data_field == 0x08:  # +3
-                    speed_change = 3
-                elif data_field == 0x07:  # +2
-                    speed_change = 2
-                elif data_field == 0x06:  # +1
-                    speed_change = 1
-                elif data_field == 0x05:  # 0 (no change)
-                    speed_change = 0
-                elif data_field == 0x04:  # -1
-                    speed_change = -1
-                elif data_field == 0x03:  # -2
-                    speed_change = -2
-                elif data_field == 0x02:  # -3
-                    speed_change = -3
-                elif data_field == 0x01:  # -4
-                    speed_change = -4
-                elif data_field == 0x00:  # -5
-                    speed_change = -5
+                # Add debouncing to prevent double processing
+                current_time = time.time()
+                last_time = self.last_command_time.get(f"{self.current_lionel_engine}_speed", 0)
+                
+                if current_time - last_time > 0.3:  # Longer debounce for speed to prevent double processing
+                    # Convert relative speed: 0xA=+5, 0x9=+4, ..., 0x5=0, ..., 0x0=-5
+                    if data_field == 0x0A:  # +5
+                        speed_change = 5
+                    elif data_field == 0x09:  # +4
+                        speed_change = 4
+                    elif data_field == 0x08:  # +3
+                        speed_change = 3
+                    elif data_field == 0x07:  # +2
+                        speed_change = 2
+                    elif data_field == 0x06:  # +1
+                        speed_change = 1
+                    elif data_field == 0x05:  # 0 (no change)
+                        speed_change = 0
+                    elif data_field == 0x04:  # -1
+                        speed_change = -1
+                    elif data_field == 0x03:  # -2
+                        speed_change = -2
+                    elif data_field == 0x02:  # -3
+                        speed_change = -3
+                    elif data_field == 0x01:  # -4
+                        speed_change = -4
+                    elif data_field == 0x00:  # -5
+                        speed_change = -5
+                    else:
+                        speed_change = 0
+                    
+                    self.last_command_time[f"{self.current_lionel_engine}_speed"] = current_time
+                    logger.info(f"🔧 DEBUG: Relative speed change: {speed_change} (data_field=0x{data_field:02x})")
+                    
+                    return {'type': 'speed', 'value': speed_change}
                 else:
-                    speed_change = 0
+                    logger.info(f"🔧 DEBUG: Speed command debounced (too soon)")
+                    return None
+        elif cmd_field == 0x20:
+            if data_field == 0x1C:
+                logger.info(f"🐛 WHISTLE PACKET: Horn press")
+            elif data_field == 0x18:
+                logger.info(f"🐛 WHISTLE PACKET: Horn release")
+                current_time = time.time()
+                last_time = self.last_command_time.get(f"{self.current_lionel_engine}_direction", 0)
                 
-                return {'type': 'speed', 'value': speed_change}
+                if current_time - last_time > self.debounce_delay:
+                    # Toggle current direction
+                    current_dir = self.engine_directions.get(self.current_lionel_engine, 'forward')
+                    new_dir = 'reverse' if current_dir == 'forward' else 'forward'
+                    self.engine_directions[self.current_lionel_engine] = new_dir
+                    self.last_command_time[f"{self.current_lionel_engine}_direction"] = current_time
+                    return {'type': 'direction', 'value': new_dir}
+                else:
+                    logger.info(f"🔧 DEBUG: Direction command debounced (too soon)")
+                    return None
+            elif data_field == 0x03:  # Reverse (00011)
+                logger.info(f"🔧 DEBUG: Button 4 - Volume DOWN detected")
+                return {'type': 'function', 'value': 'volume_down'}
+            elif data_field == 0x0C:  # Aux2 Off (01100)
+                return {'type': 'function', 'value': 'aux2_off'}
+            elif data_field == 0x0D:  # Aux2 Option 1 (01101)
+                return {'type': 'function', 'value': 'aux2_option1'}
+            elif data_field == 0x0E:  # Aux2 Option 2 (01110)
+                return {'type': 'function', 'value': 'aux2_option2'}
+            elif data_field == 0x0F:  # Aux2 On (01111)
+                return {'type': 'function', 'value': 'aux2_on'}
+            elif data_field == 0x1C:  # Horn (11100) - Whistle button - HOLD MODE
+                # Update last whistle time for timeout detection
+                self.last_whistle_time = time.time()
                 
-        elif cmd_field == 0x03:  # Absolute speed commands (binary 11 - bits 6&5 set)
-            if 0x00 <= data_field <= 0x1F:  # Absolute speed step (0-31)
-                speed_step = data_field  # Use speed step directly (0-31)
-                return {'type': 'speed', 'value': speed_step}
+                if not self.button_states.get('horn', False):
+                    # First press - turn whistle on
+                    self.button_states['horn'] = True
+                    logger.info(f"🔧 DEBUG: Horn button PRESSED - Whistle ON")
+                    return {'type': 'function', 'value': 'horn'}
+                else:
+                    # Still holding - keep whistle on, don't send duplicate commands
+                    logger.info(f"🔧 DEBUG: Horn button HELD - Whistle staying ON")
+                    return None
+            elif data_field == 0x1D:  # Bell (11101) - Button press - TOGGLE MODE
+                current_time = time.time()
+                last_time = self.last_command_time.get("bell_toggle", 0)
                 
-        elif cmd_field == 0x20:  # Extended commands (binary 01 - bit 5 set)
-            # Horn and Bell commands
-            if data_field == 0x1C:  # Blow Horn (11100)
-                return {'type': 'function', 'value': 'horn'}
-            elif data_field == 0x1A:  # Ring Bell (11010)
-                return {'type': 'function', 'value': 'bell'}
+                if current_time - last_time > self.debounce_delay:
+                    # Toggle bell state
+                    current_state = self.button_states.get('bell', False)
+                    new_state = not current_state
+                    self.button_states['bell'] = new_state
+                    self.last_command_time["bell_toggle"] = current_time
+                    
+                    if new_state:
+                        logger.info(f"🔧 DEBUG: Bell button TOGGLED ON")
+                        return {'type': 'function', 'value': 'bell'}
+                    else:
+                        logger.info(f"🔧 DEBUG: Bell button TOGGLED OFF")
+                        return {'type': 'function', 'value': 'bell_off'}
+                else:
+                    logger.info(f"🔧 DEBUG: Bell button debounced (too soon)")
+                    return None
+            elif data_field == 0x18:  # Horn Off (11000) - Button release
+                if self.button_states.get('horn', False):
+                    self.button_states['horn'] = False
+                    logger.info(f"🔧 DEBUG: Horn button RELEASED")
+                    return {'type': 'function', 'value': 'horn_off'}
+                else:
+                    return None
+            elif data_field == 0x19:  # Bell Off (11001) - Button release - IGNORE for toggle mode
+                # Ignore bell off commands since we're using toggle mode
+                logger.info(f"🔧 DEBUG: Bell button release ignored (toggle mode)")
+                return None
             
             # Direction commands
             elif data_field in [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6]:
@@ -643,14 +836,14 @@ class LionelMTHBridge:
                         
                         # Send 'y' command to establish PC connection (like ESP8266 Sendy function)
                         logger.info("🔐 Establishing PC connection with 'y' command (like ESP8266 Sendy)...")
-                        y_command = f"y2\r\n"  # Engine number 2 (default)
+                        y_command = f"y11\r\n"  # Engine number 11 (Lionel Engine #10)
                         self.mth_socket.send(y_command.encode())
                         y_response = self.mth_socket.recv(256).decode()
                         logger.info(f"🔍 WTIU y response: {y_response.strip()}")
                         
                         # Test if connection is working by sending a simple command
                         logger.info("🔐 Testing connection with simple command...")
-                        test_command = "y2\r\n"
+                        test_command = "y11\r\n"
                         self.mth_socket.send(test_command.encode())
                         test_response = self.mth_socket.recv(256).decode()
                         logger.info(f"🔍 Test response: {test_response.strip()}")
@@ -709,20 +902,12 @@ class LionelMTHBridge:
             logger.info(f"🔍 ! command response: {version_response.strip()}")
             
             # 3. Send y command with engine number (like ESP8266 Sendy)
-            # Engine number 2 = DCS engine 1 (first normal engine)
-            self.mth_socket.send(b"y2\r\n")
+            # Map Lionel Engine #10 to WTIU Engine #11 (DCS #12)
+            # Map Lionel Engine #11 to WTIU Engine #12 (DCS #13) 
+            # Default to Engine #11 for Lionel Engine #10
+            self.mth_socket.send(b"y12\r\n")
             y_response = self.mth_socket.recv(256).decode()
             logger.info(f"🔍 y command response: {y_response.strip()}")
-            
-            # 4. Send m4 to enter command mode (like ESP8266)
-            self.mth_socket.send(b"m4\r\n")
-            m4_response = self.mth_socket.recv(256).decode()
-            logger.info(f"🔍 m4 command response: {m4_response.strip()}")
-            
-            # 5. Send u4 to startup engine (like ESP8266)
-            self.mth_socket.send(b"u4\r\n")
-            u4_response = self.mth_socket.recv(256).decode()
-            logger.info(f"🔍 u4 command response: {u4_response.strip()}")
             
             logger.info("✅ WTIU setup complete - ready for commands!")
             return True
@@ -771,6 +956,29 @@ class LionelMTHBridge:
         
         try:
             with self.mth_lock:
+                # Select the correct engine based on TMCC packet
+                if self.current_lionel_engine > 0:
+                    # Map Lionel Engine # to WTIU Engine # based on discovery
+                    if self.current_lionel_engine == 10:
+                        wtiu_engine = 11  # Lionel #10 → WTIU #11 (DCS #10)
+                    elif self.current_lionel_engine == 11:
+                        wtiu_engine = 12  # Lionel #11 → WTIU #12 (DCS #11)
+                    elif self.current_lionel_engine == 5:
+                        wtiu_engine = 6   # Lionel #5 → WTIU #6 (DCS #7)
+                    else:
+                        wtiu_engine = self.current_lionel_engine + 1  # Default mapping
+                    
+                    # Send engine selection command first
+                    logger.info(f"🔧 Selecting WTIU Engine #{wtiu_engine} for Lionel Engine #{self.current_lionel_engine}")
+                    select_cmd = f"y{wtiu_engine}\r\n"
+                    self.mth_socket.send(select_cmd.encode())
+                    time.sleep(0.1)  # Brief pause for engine selection
+                    try:
+                        select_response = self.mth_socket.recv(256).decode()
+                        logger.info(f"🔍 Engine selection response: {select_response.strip()}")
+                    except:
+                        pass  # Don't fail if no response to selection
+                
                 # Convert command to MTH protocol format
                 mth_cmd = self.convert_to_mth_protocol(command)
                 if mth_cmd:
@@ -796,15 +1004,33 @@ class LionelMTHBridge:
         cmd_map = {
             'direction': {
                 'forward': 'd0',
-                'reverse': 'd1',
-                'toggle': 'd0'  # Default to forward on toggle
+                'reverse': 'd1'
             },
             'speed': lambda x: self.convert_speed(x),
             'function': {
                 'horn': 'w2',
                 'bell': 'w4',
                 'horn_off': 'bFFFD',
-                'bell_off': 'bFFFB'
+                'bell_off': 'bFFFB',
+                'whistle_on': 'w2',
+                'whistle_off': 'bFFFD',
+                'smoke_on': 'abF',
+                'smoke_off': 'abE',
+                'smoke_toggle': 'abF',
+                'volume_up': 'v+',
+                'volume_down': 'v-',
+                'front_coupler': 'c0',
+                'rear_coupler': 'c1',
+                'whistle_pitch_1': 'w2',
+                'whistle_pitch_2': 'w2',
+                'whistle_pitch_3': 'w2',
+                'whistle_pitch_4': 'w2',
+                'whistle_pitch_5': 'w2'
+            },
+            'smoke': {
+                'on': 'abF',
+                'off': 'abE',
+                'level': 'ab10'
             },
             'engine': {
                 'startup': 'u4',
@@ -819,6 +1045,13 @@ class LionelMTHBridge:
             if cmd_type == 'speed':
                 # Convert speed
                 return cmd_map['speed'](cmd_value)
+            elif cmd_type == 'direction' and cmd_value == 'toggle':
+                # Handle direction toggle - track state per engine
+                current_dir = self.engine_directions.get(self.current_lionel_engine, 'forward')
+                new_dir = 'reverse' if current_dir == 'forward' else 'forward'
+                self.engine_directions[self.current_lionel_engine] = new_dir
+                logger.info(f"🔧 DEBUG: Direction toggled from {current_dir} to {new_dir}")
+                return cmd_map['direction'][new_dir]
             elif cmd_value in cmd_map[cmd_type]:
                 return cmd_map[cmd_type][cmd_value]
         
@@ -837,7 +1070,7 @@ class LionelMTHBridge:
                     # Try to convert string to int
                     try:
                         speed_int = int(speed_value)
-                        return self.convert_speed(speed_int)
+                        return "s0"
                     except:
                         return 's0'
             
@@ -846,14 +1079,61 @@ class LionelMTHBridge:
                 logger.warning(f"⚠️ Invalid speed value type: {type(speed_value)}")
                 return 's0'
             
+            # Handle relative speed changes (+1, -1, -2, etc.)
+            current_speed = self.engine_speeds.get(self.current_lionel_engine, 0)
+            new_speed = current_speed + speed_value
+            new_speed = max(0, min(31, new_speed))  # Clamp to 0-31
+            
+            # Update tracked speed for this engine
+            self.engine_speeds[self.current_lionel_engine] = new_speed
+            
             # Convert 0-31 to 0-120 (scale factor ~3.87)
-            dcs_speed = int(speed_value * 120 / 31)
+            logger.info(f"🔧 DEBUG: Engine {self.current_lionel_engine} speed {current_speed} + {speed_value} = {new_speed}")
+            dcs_speed = int(new_speed * 120 / 31)
             dcs_speed = max(0, min(120, dcs_speed))  # Clamp to 0-120
+            logger.info(f"🔧 DEBUG: Converted to DCS speed {dcs_speed}")
             return f"s{dcs_speed}"
             
         except Exception as e:
             logger.error(f"❌ Speed conversion error: {e}")
             return 's0'
+    
+    def discover_wtiu_engines(self):
+        """Discover engines configured on WTIU using Mark's reference commands"""
+        logger.info("🔍 Discovering WTIU engines...")
+        
+        # MTH WTIU engine discovery commands from Mark's reference
+        discovery_commands = [
+            ("x", "Read TIU number and AIU count"),
+            ("!", "Read TIU version"),
+            ("I0", "Check for Engines - returns bit map of engines"),
+            ("I1", "Factory reset engine (DCS #1)"),
+            ("I2", "Engine #2 (DCS #3)"),
+            ("I3", "Engine #3 (DCS #4)"),
+            ("I4", "Engine #4 (DCS #5)"),
+            ("I5", "Engine #5 (DCS #6)"),
+            ("I6", "Engine #6 (DCS #7)"),
+            ("I7", "Engine #7 (DCS #8)"),
+            ("I8", "Engine #8 (DCS #9)"),
+            ("I9", "Engine #9 (DCS #10)"),
+            ("I10", "Engine #10 (DCS #11)"),
+            ("I11", "Engine #11 (DCS #12)"),
+            ("I12", "Engine #12 (DCS #13)"),
+        ]
+        
+        for cmd, desc in discovery_commands:
+            logger.info(f"🔍 Sending discovery command: {cmd} ({desc})")
+            self.mth_socket.send(f"{cmd}\r\n".encode())
+            try:
+                response = self.mth_socket.recv(256).decode()
+                logger.info(f"🔍 Response: {response.strip()}")
+            except socket.timeout:
+                logger.info(f"🔍 Timeout for {cmd}")
+            except Exception as e:
+                logger.info(f"🔍 Error: {e}")
+            time.sleep(0.5)
+        
+        logger.info("🔍 WTIU engine discovery complete")
     
     def debug_wtiu_connection(self):
         """Debug WTIU connection and commands"""
@@ -885,50 +1165,63 @@ class LionelMTHBridge:
                 logger.info(f"🐛 DEBUG: Error: {e}")
             time.sleep(0.5)
         
-        logger.info("🐛 DEBUG: Test complete")
-    
-    def send_to_mth_original(self, command):
-        """Send command to MTH WTIU via WiFi"""
-        for ip in self.mth_devices:
+        logger.info("🔍 WTIU debug complete")
+        packet_count = 0
+        last_activity = time.time()
+        
+        while self.running:
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(2)
-                s.connect((ip, 8882))  # MTH WTIU uses port 8882, not 80
-                
-                # Send HTTP request with command
-                if command['type'] == 'direction':
-                    path = f"/control/direction/{command['value']}"
-                elif command['type'] == 'speed':
-                    path = f"/control/speed/{command['value']}"
-                elif command['type'] == 'function':
-                    path = f"/control/function/{command['value']}"
-                elif command['type'] == 'smoke':
-                    path = f"/control/smoke/{command['value']}"
-                elif command['type'] == 'pfa':
-                    path = f"/control/pfa/{command['value']}"
-                elif command['type'] == 'engine':
-                    if command['value'] == 'start':
-                        path = "/control/engine/start"
-                    elif command['value'] == 'stop':
-                        path = "/control/engine/stop"
-                    else:
-                        path = f"/control/engine/{command['value']}"
-                else:
-                    path = f"/control/{command['type']}/{command['value']}"
-                
-                http_request = f"GET {path} HTTP/1.1\r\nHost: {ip}\r\n\r\n"
-                s.send(http_request.encode())
-                
-                response = s.recv(1024)
-                logger.debug(f"MTH {ip} response: {response[:50]}...")
-                s.close()
-                
-                return True
+                with self.lionel_lock:
+                    if self.lionel_serial and self.lionel_serial.is_open:
+                        # Check for any data in the buffer
+                        if self.lionel_serial.in_waiting > 0:
+                            data = self.lionel_serial.read(self.lionel_serial.in_waiting)
+                            last_activity = time.time()
+                            logger.info(f"🔍 Received {len(data)} bytes: {data.hex()}")
+                            
+                            # Look for TMCC packets
+                            for i in range(len(data) - 2):
+                                if data[i] == 0xFE:
+                                    packet = data[i:i+3]
+                                    packet_count += 1
+                                    logger.info(f"🎯 TMCC Packet #{packet_count}: {packet.hex()}")
+                                    
+                                    # Parse and forward
+                                    command = self.parse_tmcc_packet(packet)
+                                    if command:
+                                        logger.info(f"📤 Command: {command}")
+                                        
+                                        # Log what we're trying to send
+                                        mth_cmd = self.convert_to_mth_protocol(command)
+                                        if mth_cmd:
+                                            logger.info(f"📤 MTH Command: {mth_cmd}")
+                                        else:
+                                            logger.warning(f"⚠️ Failed to convert command: {command}")
+                                        
+                                        # Send to MCU
+                                        if self.send_to_mcu(command):
+                                            logger.info("✅ Sent to MCU")
+                                        else:
+                                            logger.warning("⚠️ Failed to send to MCU")
+                                        
+                                        # Send to MTH
+                                        if self.send_to_mth(command):
+                                            logger.info("✅ Sent to MTH")
+                                        else:
+                                            logger.warning("⚠️ Failed to send to MTH")
+                                    else:
+                                        logger.warning(f"⚠️ Failed to parse packet: {packet.hex()}")
+                        else:
+                            # Log every 10 seconds if no data received
+                            if time.time() - last_activity > 10:
+                                logger.warning("⚠️ No data received from Lionel Base 3 for 10 seconds")
+                                last_activity = time.time()
+            
+                time.sleep(0.01)
                 
             except Exception as e:
-                logger.debug(f"MTH {ip} error: {e}")
-        
-        return False
+                logger.error(f"Lionel listener error: {e}")
+                time.sleep(1)
     
     def lionel_listener(self):
         """Listen for TMCC packets from Lionel Base 3"""
@@ -1018,10 +1311,9 @@ class LionelMTHBridge:
             logger.warning("⚠️ MTH WTIU connection failed, will auto-reconnect...")
             logger.info("💡 Note: Make sure MTH WTIU is powered and connected to WiFi")
         
-        # Test MTH connection with debug commands
+        # MTH connection ready
         if self.mth_connected:
-            logger.info("🧪 Running debug test...")
-            self.debug_wtiu_connection()
+            logger.info("✅ MTH WTIU connection ready for commands")
         
         self.running = True
         
@@ -1034,7 +1326,37 @@ class LionelMTHBridge:
             self.start_tmcc_monitoring()
         
         logger.info("✅ Bridge started with auto-reconnect! Use Lionel Base 3 remote...")
+        
+        # Start whistle timeout monitor
+        self.start_whistle_timeout_monitor()
+        
         return True
+    
+    def start_whistle_timeout_monitor(self):
+        """Start the whistle timeout monitoring thread"""
+        self.whistle_monitor_thread = threading.Thread(target=self.monitor_whistle_timeout, daemon=True)
+        self.whistle_monitor_thread.start()
+        logger.info("🔍 Whistle timeout monitor started")
+    
+    def monitor_whistle_timeout(self):
+        """Monitor whistle state and turn off when packets stop"""
+        while self.running:
+            try:
+                if self.button_states.get('horn', False):
+                    current_time = time.time()
+                    if current_time - self.last_whistle_time > self.whistle_timeout:
+                        # Turn off whistle due to timeout
+                        self.button_states['horn'] = False
+                        logger.info(f"🔧 DEBUG: Whistle TIMEOUT - Turning OFF")
+                        
+                        # Send horn off command
+                        command = {'type': 'function', 'value': 'horn_off'}
+                        self.send_to_mth(command)
+                
+                time.sleep(0.1)  # Check every 100ms
+            except Exception as e:
+                logger.error(f"Whistle monitor error: {e}")
+                time.sleep(1)
     
     def stop(self):
         """Stop the bridge"""
@@ -1218,6 +1540,17 @@ def test_connection_manually():
         bridge.stop()
     else:
         logger.error("❌ Failed to connect to MTH WTIU")
+
+def check_whistle_timeout(self):
+        """Check if whistle should be turned off due to timeout"""
+        if self.button_states.get('horn', False):
+            current_time = time.time()
+            if current_time - self.last_whistle_time > self.whistle_timeout:
+                # Turn off whistle due to timeout
+                self.button_states['horn'] = False
+                logger.info(f"🔧 DEBUG: Whistle TIMEOUT - Turning OFF")
+                return {'type': 'function', 'value': 'horn_off'}
+        return None
 
 def main():
     print("🎯 Lionel Base 3 → MTH WTIU Bridge")

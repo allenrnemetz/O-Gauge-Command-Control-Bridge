@@ -1,0 +1,16 @@
+[Unit]
+Description=Lionel to MTH Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=arduino
+WorkingDirectory=/home/arduino/ArduinoApps/lcs-to-mth-bridge/python
+ExecStartPre=/bin/sleep 10
+ExecStart=/usr/bin/python3 /home/arduino/ArduinoApps/lcs-to-mth-bridge/python/lionel_mth_bridge.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

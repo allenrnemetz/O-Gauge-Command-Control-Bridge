@@ -1,1 +1,25 @@
+# IDE/Editor
 windsurf-project.code-workspace
+*.code-workspace
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Backup/temp files
+*_backup.py
+*_from_arduino.py
+*.bak
+*.tmp
+*.log
+
+# Test files (empty)
+test_lionel.py
+
+# OS files
+.DS_Store
+Thumbs.db

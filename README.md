@@ -1,369 +1,261 @@
-# Lionel Base 3 → MTH WTIU Bridge
+# Lionel-MTH Bridge
 
-**Control MTH DCS trains using Lionel Cab-1L, Cab-2, or Cab-3 remotes via Arduino UNO Q**
+**Control MTH DCS trains using your Lionel Cab-1L, Cab-2, or Cab-3 remote**
 
-Author: Allen Nemetz  
-Copyright © 2026 Allen Nemetz. All rights reserved.  
-License: GNU General Public License v3.0
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Status: Beta](https://img.shields.io/badge/Status-Beta-yellow.svg)]()
 
 ---
-
 ## Credits
 
-- **Mark DiVecchio** for MTH WTIU protocol translation work  
-  http://www.silogic.com/trains/RTC_Running.html
-- **Lionel LLC** for TMCC and Legacy protocol specifications
-- **O Gauge Railroading Forum** (https://www.ogrforum.com/)
-
-## Disclaimer
-
-This software is provided "as-is" without warranty. The author assumes no liability for damages resulting from use or misuse. Users are responsible for safe operation of model railroad equipment.
+- **Mark DiVecchio** - MTH WTIU protocol research ([silogic.com](http://www.silogic.com/trains/RTC_Running.html))
+- **Lionel LLC** - TMCC protocol documentation
+- **O Gauge Railroading Forum** - Community support
 
 ---
 
-## Overview
+## What Is This?
 
-This bridge enables Lionel Base 3 systems to control MTH DCS trains using Arduino UNO Q's dual-processor architecture:
+This project bridges Lionel's TMCC/Legacy command system to MTH's DCS system, allowing you to control MTH DCS locomotives using your existing Lionel remote control.
 
-- **MPU (Qualcomm QRB2210)**: Runs Python, handles Lionel Base 3 TMCC via USB, WiFi to MTH WTIU
-- **MCU (STM32U585)**: Receives commands from MPU, processes locally if needed
-
-### Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│ Arduino UNO Q                                           │
-│                                                         │
-│  MPU (Linux - Qualcomm QRB2210)                         │
-│  • Python: lionel_mth_bridge_fixed.py                   │
-│  • WiFi to MTH WTIU (with mDNS discovery)               │
-│  • Speck encryption for secure communication            │
-│  • Serial to Lionel Base 3 (SER2 via FTDI)              │
-│                                                         │
-│         ↓ arduino-router socket                         │
-│                                                         │
-│  MCU (Arduino - STM32U585)                              │
-│  • Sketch: mcu_mth_handler.ino                          │
-│  • NO WiFi (handled by Python on MPU)                   │
-│  • Receives commands via Serial1                        │
-│  • USB Serial for debugging                             │
-└─────────────────────────────────────────────────────────┘
-```
+**Use your Lionel remote → Control MTH trains**
 
 ---
 
 ## Features
 
-- ✅ **Auto-Reconnect**: Detects and connects when SER2 is powered on
-- ✅ **Power-Cycle Resilient**: Handles SER2 power cycling
-- ✅ **mDNS Discovery**: Auto-finds MTH WTIU (no hardcoded IP)
-- ✅ **Speck Encryption**: Secure WTIU communication
-- ✅ **Direct Engine Mapping**: Lionel 1-99 → MTH 1-99
-- ✅ **Fine Speed Control**: Ultra-fine low-speed control
-- ✅ **Smart Whistle**: Auto-switches between regular/protowhistle
-- ✅ **ProtoWhistle Support**: Full MTH protowhistle control
-- ✅ **LED Indicator**: Shows WTIU connection status
+- **Whistle** - Hold button to blow, release to stop
+- **Bell** - Toggle on/off with each press  
+- **Speed Control** - Smooth relative speed changes
+- **Direction** - Toggle forward/reverse
+- **Startup/Shutdown** - Full engine sequences
+- **Smoke On/Off** - Control smoke unit
+- **Volume Up/Down** - Adjust master volume
 
 ---
 
 ## Hardware Requirements
 
-| Component | Model | Description |
-|-----------|-------|-------------|
-| **Lionel Base 3** | 2208010 | TMCC command base |
-| **Lionel Remote** | Cab-1L/Cab-2/Cab-3 | Base 3 compatible |
-| **Lionel LCS SER2** | 6-81326 | TMCC to serial converter |
-| **FTDI Cable** | USB-SER9 | USB serial adapter |
-| **Arduino UNO Q** | ABX00162 | Dual-processor board |
-| **MTH WTIU** | 50-1039 | WiFi DCS controller |
+| Component | Model | Purpose |
+|-----------|-------|---------|
+| Lionel Base 3 | 6-82972 | TMCC command receiver |
+| Lionel Remote | Cab-1L, Cab-2, or Cab-3 | Your controller |
+| Lionel LCS SER2 | 6-81326 | Serial output from Base 3 |
+| FTDI USB-Serial | Any 9600 baud | Connect SER2 to computer |
+| MTH WTIU | 50-1039 | WiFi DCS interface |
+| Arduino UNO Q | ABX00162 | Bridge processor |
 
 ### Connection Diagram
+
 ```
-Lionel Base 3 → SER2 → FTDI Cable → Arduino UNO Q → WiFi → MTH WTIU
+Lionel Remote → Base 3 → SER2 → FTDI → Arduino UNO Q → WiFi → MTH WTIU → Track
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Upload MCU Sketch
+### 1. Hardware Setup
 
-```
-1. Open mcu_mth_handler.ino in Arduino IDE
-2. Tools → Board → Arduino UNO Q (or STM32U585)
-3. Tools → Port → (your COM port)
-4. Click Upload
-5. Open Serial Monitor at 115200 baud
-6. You should see: "=== MTH WTIU Handler Starting ==="
-```
+1. Connect SER2 to Lionel Base 3 LCS port
+2. Connect FTDI cable to SER2 DB9 port
+3. Connect FTDI USB to Arduino UNO Q
+4. Power on MTH WTIU and connect to your WiFi network
 
-### 2. Test MCU
+### 2. Arduino UNO Q First-Time Setup
 
-Type in Serial Monitor:
-```
-CMD:2:15
-```
+If this is your first time using the Arduino UNO Q:
 
-Expected output:
-```
-RX USB: CMD:2:15
-Parsed - Type: 2, Value: 15
-Executing command: type=2, engine=1, value=15
-Speed: 15
-Command processed (MTH connection handled by Python)
-Sent ACK to MPU
-```
+1. **Download Arduino App Lab** from the Arduino website
+2. **Connect the board** via USB-C to your computer
+3. **Open Arduino App Lab** and follow the setup wizard
+4. **Connect to WiFi**:
+   - In App Lab, go to **Settings → Network**
+   - Select your WiFi network (must be the **same network** as your MTH WTIU)
+   - Enter your WiFi password
+   - Note the board's IP address once connected
+5. **Verify network connectivity**:
+   - The WTIU and Arduino must be on the same subnet (e.g., both on `192.168.0.x`)
 
-### 3. Install Python Dependencies
+### 3. Software Installation
 
-SSH into Arduino UNO Q:
-```bash
-# Replace <YOUR_BOARD_IP> with your board's actual IP address
-ssh root@<YOUR_BOARD_IP>
-
-# Update package list
-apt update
-
-# Install required packages using apt
-apt install -y python3-serial python3-zeroconf python3-pycryptodome
-```
-
-See `INSTALL_DEPENDENCIES.md` for details.
-
-### 4. Deploy Python Script
+SSH into your Arduino UNO Q:
 
 ```bash
-# From your computer (replace <YOUR_BOARD_IP> with your board's IP)
-scp lionel_mth_bridge_fixed.py root@<YOUR_BOARD_IP>:/home/
+ssh arduino@<your-board-ip>
 
-# SSH into board
-ssh root@<YOUR_BOARD_IP>
-cd /home
-python3 lionel_mth_bridge_fixed.py
+# Install dependencies
+sudo apt update
+sudo apt install -y python3-serial python3-zeroconf python3-pycryptodome
+
+# Copy the bridge script
+cd /home/arduino/ArduinoApps
+mkdir -p lcs-to-mth-bridge/python
+cd lcs-to-mth-bridge/python
 ```
 
-### 5. Test MPU-MCU Connection
+Copy `lionel_mth_bridge.py` and `lionel-mth-bridge.service` to this directory.
+
+### 4. Configure Auto-Start Service
+
+To have the bridge start automatically when the Arduino boots:
 
 ```bash
-# On the board via SSH
-python3 -c "
-import socket
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect('/var/run/arduino-router.sock')
-s.send(b'CMD:2:15\n')
-s.close()
-print('Command sent to MCU')
-"
+# Copy the service file to systemd
+sudo cp lionel-mth-bridge.service /etc/systemd/system/
+
+# Reload systemd to recognize the new service
+sudo systemctl daemon-reload
+
+# Enable the service to start on boot
+sudo systemctl enable lionel-mth-bridge.service
+
+# Start the service now
+sudo systemctl start lionel-mth-bridge.service
+
+# Check status
+sudo systemctl status lionel-mth-bridge.service
 ```
+
+**Service Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `sudo systemctl start lionel-mth-bridge` | Start the bridge |
+| `sudo systemctl stop lionel-mth-bridge` | Stop the bridge |
+| `sudo systemctl restart lionel-mth-bridge` | Restart the bridge |
+| `sudo systemctl status lionel-mth-bridge` | Check status |
+| `sudo journalctl -u lionel-mth-bridge -f` | View live logs |
+
+### 5. Manual Run (Optional)
+
+If you prefer to run manually instead of using the service:
+
+```bash
+python3 lionel_mth_bridge.py
+```
+
+You should see:
+```
+✅ Connected to Lionel Base 3 on /dev/ttyUSB0
+✅ Connected to MTH WTIU at 192.168.x.x
+🎯 Monitoring Lionel Base 3 for TMCC packets...
+```
+
+---
+
+## Remote Control Mapping
+
+### Lionel Cab-1L / Cab-2 / Cab-3
+
+| Button | Function | MTH Action |
+|--------|----------|------------|
+| **Whistle** | Hold to blow | Whistle on while held |
+| **Bell** | Press to toggle | Bell on/off |
+| **Speed Knob** | Turn | Relative speed change |
+| **Direction** | Press | Toggle forward/reverse |
+| **AUX1** | Startup | Engine startup sequence |
+| **Keypad 5** | Shutdown | Engine shutdown sequence |
+| **Keypad 8** | Smoke Off | Turn smoke unit off |
+| **Keypad 9** | Smoke On | Turn smoke unit on |
+| **Keypad 1** | Volume Up | Increase master volume |
+| **Keypad 4** | Volume Down | Decrease master volume |
 
 ---
 
 ## Configuration
 
-### Python Script Settings
-
-Edit `lionel_mth_bridge_fixed.py`:
+Edit `lionel_mth_bridge.py` to customize:
 
 ```python
-# MTH WTIU (auto-discovered via mDNS, or manual fallback)
-self.mth_host = None  # Auto-discover, or set to 'YOUR_WTIU_IP'
-self.mth_port = 50001
+# MTH WTIU connection
+self.mth_host = '192.168.x.xxxx'  # Your WTIU IP address
+self.mth_port = xxxxx           # WTIU port
 
-# Lionel Base 3 SER2
-self.lionel_port = '/dev/ttyUSB0'  # FTDI adapter
-
-# Features
-self.use_mdns = True         # Auto-discover WTIU
-self.use_encryption = True   # Speck encryption
+# Lionel Base 3 serial port
+self.lionel_port = '/dev/ttyUSB0'  # FTDI adapter port
 ```
 
-### Network Requirements
+### Engine Mapping
 
-- **Same network** as MTH WTIU
-- **mDNS/Bonjour enabled** (usually default on modern routers)
+The bridge maps Lionel engine numbers to MTH DCS engine numbers:
 
----
+| Lionel Engine # | MTH WTIU Engine # |
+|-----------------|-------------------|
+| 10 | 11 |
+| 11 | 12 |
+| 5 | 6 |
+| Others | +1 offset |
 
-## Command Format
-
-Commands between MPU and MCU use: `CMD:type:value`
-
-### Command Types
-
-| Type | Description | Values |
-|------|-------------|--------|
-| `1` | Direction | 0=reverse, 1=forward |
-| `2` | Speed | 0-31 |
-| `3` | Function | 1=horn, 2=bell |
-| `4` | Smoke | 1-4 (increase/decrease/on/off) |
-| `5` | PFA | 1=cab_chatter, 2=towercom |
-| `6` | Engine | 0=stop, 1=start |
-| `8` | ProtoWhistle | Various |
-| `9` | Engine number | MTHEngine number with offset |
-
-### Examples
-
-```
-CMD:2:15    # Set speed to 15
-CMD:1:1     # Set direction forward
-CMD:3:1     # Activate horn
-CMD:6:1     # Engine startup
-```
-
----
-
-## TMCC to MTH Command Mapping
-
-| TMCC Command | Packet | MTH Command | Description |
-|--------------|--------|-------------|-------------|
-| Forward | FE 00 00 | d0 | Forward motion |
-| Reverse | FE 00 1F | d1 | Reverse motion |
-| Speed | FE 03 XX | sXX | Speed control (0-31) |
-| Horn | FE 00 1C | w2 | Horn/whistle |
-| Bell | FE 00 1D | w4 | Bell |
-| Engine Start | FE 01 00 | u4 | Startup sequence |
-| Engine Stop | FE 01 FF | u5 | Shutdown sequence |
-| Smoke Increase | FE 00 18 | - | Smoke intensity up |
-| Smoke Decrease | FE 00 19 | - | Smoke intensity down |
-| Cab Chatter | FE 00 16 | - | PFA cab chatter |
-| TowerCom | FE 00 17 | - | PFA TowerCom |
-
----
-
-## Remote Control Guide
-
-### Engine Control
-
-**Startup:**
-- **AUX 1** button (all remotes)
-- **MASTER KEY → ENGINE START** (Cab-2/Cab-3)
-- Sends: `FE 01 00` → MTH: `u4`
-
-**Shutdown:**
-- **Number 5** key (all remotes)
-- **MASTER KEY → ENGINE STOP** (Cab-2/Cab-3)
-- Sends: `FE 01 FF` → MTH: `u5`
-
-### Smoke Control
-
-**Cab-1L:**
-- **Number 8**: Decrease smoke
-- **Number 9**: Increase smoke
-
-**Cab-2/Cab-3:**
-- **SMOKE INCREASE** button
-- **SMOKE DECREASE** button
-- **SMOKE ON/OFF** buttons
-
-### ProtoWhistle
-
-- **AUX2**: Toggle protowhistle mode
-- **Whistle button**: Adapts based on mode
-  - OFF: Regular MTH whistle
-  - ON: MTH protowhistle (quillable)
+Adjust the mapping in `send_to_mth()` if needed.
 
 ---
 
 ## Troubleshooting
 
-### MCU Not Responding
+### WTIU Connection Issues
 
-1. Check LED blinks 3 times on startup
-2. Open Serial Monitor at 115200 baud
-3. Look for "MTH WTIU Handler Ready"
-4. Test with: `CMD:2:15`
+1. Verify WTIU is powered on and connected to WiFi
+2. Check that Arduino UNO Q is on the same network
+3. Try setting the WTIU IP manually in the script
 
-### Python Can't Connect to MCU
+### No Response from Train
 
-```bash
-# Check arduino-router service
-ps aux | grep arduino-router
+1. Verify engine is added to WTIU (use MTH app first)
+2. Check engine number mapping in the script
+3. Look at log output for error messages
 
-# Check socket exists
-ls -la /var/run/arduino-router.sock
+### Commands Not Recognized
 
-# Test socket
-python3 -c "import socket; s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect('/var/run/arduino-router.sock'); print('OK')"
+Check the log output - it shows the raw TMCC packets received. If you see "Failed to parse packet", the data_field value may need to be added to the mapping.
+
+---
+
+## Technical Details
+
+### TMCC Packet Format
+
+```
+Byte 0: 0xFE (sync byte)
+Byte 1: Address bits 15-8
+Byte 2: Command and data bits 7-0
 ```
 
-### MTH WTIU Not Found
+### MTH DCS Commands
 
-1. Check WTIU is powered on
-2. Verify same WiFi network (2.4GHz)
-3. Test mDNS: `avahi-browse -a` (on board)
-4. Fallback: Set manual IP in Python script
-   ```python
-   self.mth_host = '192.168.x.x'  # Your WTIU IP
-   ```
-
-### Lionel Base 3 Not Detected
-
-```bash
-# Check FTDI adapter
-ls -la /dev/ttyUSB*
-
-# Test serial port
-cat /dev/ttyUSB0
-```
-
-### Enable Debug Logging
-
-Edit `lionel_mth_bridge_fixed.py`:
-```python
-logging.basicConfig(level=logging.DEBUG, ...)
-```
+| Command | Description |
+|---------|-------------|
+| `d0` | Direction forward |
+| `d1` | Direction reverse |
+| `s{0-120}` | Speed (0-120 scale) |
+| `w2` | Whistle on |
+| `w4` | Bell on |
+| `bFFFD` | Whistle off |
+| `bFFFB` | Bell off |
+| `u4` | Engine startup |
+| `u5` | Engine shutdown |
+| `abF` | Smoke on |
+| `abE` | Smoke off |
 
 ---
 
-## Files
-
-### Core Files
-- **`mcu_mth_handler.ino`** - MCU sketch (upload to Arduino)
-- **`lionel_mth_bridge_fixed.py`** - Python bridge (run on MPU)
-
-### Documentation
-- **`README.md`** - This file
-- **`INSTALL_DEPENDENCIES.md`** - Python package installation guide
-
-### Configuration
-- **`.gitignore`** - Git ignore rules
-- **`.gitattributes`** - Git attributes
-
----
-
-## What's Different from Original Design
-
-### Original (Incorrect)
-- MCU handled WiFi, mDNS, Speck encryption
-- Used WiFiS3, ArduinoMDNS libraries (don't exist for STM32U585)
-- MCU tried to connect directly to WTIU
-
-### Current (Correct)
-- **MPU handles WiFi** - Qualcomm chip has WiFi
-- **MPU handles mDNS** - Python zeroconf library
-- **MPU handles encryption** - Python crypto libraries
-- **MCU just receives commands** - Via Serial1 from MPU
-- **Proper architecture** - Uses Arduino UNO Q's dual-processor design
-
----
-
-## Next Steps
-
-1. ✅ Upload `mcu_mth_handler.ino` to MCU
-2. ✅ Test MCU with Serial Monitor
-3. ✅ Install Python dependencies on MPU
-4. ✅ Deploy Python script to MPU
-5. ✅ Test MPU-MCU communication
-6. ⏳ Get SER2 hardware for Lionel Base 3
-7. ⏳ Connect MTH WTIU to WiFi
-8. ⏳ Test complete system!
-
----
 
 ## License
 
 GNU General Public License v3.0
 
-## Author
+Copyright (c) 2026 Allen Nemetz
 
-© Allen Nemetz 2026
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+---
+
+## Contributing
+
+This is a beta release for user testing. Please report issues on GitHub with:
+
+1. Log output showing the problem
+2. Your hardware configuration
+3. Steps to reproduce
+
+Pull requests welcome!
