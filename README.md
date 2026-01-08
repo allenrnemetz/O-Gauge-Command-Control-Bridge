@@ -44,6 +44,7 @@ This project bridges Lionel's TMCC/Legacy command system to MTH's DCS system, al
 | FTDI USB-Serial | Any 9600 baud | Connect SER2 to computer |
 | MTH WTIU | 50-1039 | WiFi DCS interface |
 | Arduino UNO Q | ABX00162 | Bridge processor |
+| USB Hub with PD |
 
 ### Connection Diagram
 
@@ -59,7 +60,7 @@ Lionel Remote → Base 3 → SER2 → FTDI → Arduino UNO Q → WiFi → MTH WT
 
 1. Connect SER2 to Lionel Base 3 LCS port
 2. Connect FTDI cable to SER2 DB9 port
-3. Connect FTDI USB to Arduino UNO Q
+3. Connect FTDI USB to USB Hub with PD to Arduino UNO Q
 4. Power on MTH WTIU and connect to your WiFi network
 
 ### 2. Arduino UNO Q First-Time Setup
@@ -163,33 +164,7 @@ You should see:
 
 ---
 
-## Configuration
-
-Edit `lionel_mth_bridge.py` to customize:
-
-```python
-# MTH WTIU connection
-self.mth_host = '192.168.x.xxxx'  # Your WTIU IP address
-self.mth_port = xxxxx           # WTIU port
-
-# Lionel Base 3 serial port
-self.lionel_port = '/dev/ttyUSB0'  # FTDI adapter port
-```
-
-### Engine Mapping
-
-The bridge maps Lionel engine numbers to MTH DCS engine numbers:
-
-| Lionel Engine # | MTH WTIU Engine # |
-|-----------------|-------------------|
-| 10 | 11 |
-| 11 | 12 |
-| 5 | 6 |
-| Others | +1 offset |
-
-Adjust the mapping in `send_to_mth()` if needed.
-
----
+## 
 
 ## Troubleshooting
 
@@ -197,7 +172,6 @@ Adjust the mapping in `send_to_mth()` if needed.
 
 1. Verify WTIU is powered on and connected to WiFi
 2. Check that Arduino UNO Q is on the same network
-3. Try setting the WTIU IP manually in the script
 
 ### No Response from Train
 
