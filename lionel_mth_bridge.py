@@ -3203,7 +3203,8 @@ class LionelMTHBridge:
                 mth_id = self.lashup_manager.get_mth_id_for_tr(train_id)
                 if mth_id:
                     logger.info(f"🚂 Train command for TR{train_id} -> MTH lashup {mth_id}")
-                    # TODO: Forward command to MTH lashup
+                    # Forward command to MTH lashup
+                    self.forward_train_command_to_mth(train_id, mth_id, command)
                 elif train_id not in self.queried_trains and train_id not in self.pending_train_queries:
                     # First command to this TR ID - query PDI to check for MTH engines
                     logger.info(f"🔗 New TR{train_id} detected - scheduling PDI query")
@@ -3216,6 +3217,118 @@ class LionelMTHBridge:
             return True
         
         return False
+    
+    def forward_train_command_to_mth(self, train_id: int, mth_id: int, command: dict):
+        """Forward a train command to the corresponding MTH lashup
+        
+        Args:
+            train_id: Lionel TR ID
+            mth_id: MTH lashup ID (101-120)
+            command: Parsed command dict with 'command' field containing the raw command code
+        """
+        cmd_code = command.get('command', 0)
+        
+        # Map TMCC2 train commands to MTH lashup commands
+        # Speed commands: 0x000-0x0C7 (0-199)
+        if cmd_code <= 0x0C7:
+            speed = cmd_code
+            # Convert Legacy 200-step to DCS 120-step
+            dcs_speed = int(speed * 120 / 199)
+            mth_cmd = f"s{dcs_speed}"
+            logger.info(f"🚂 TR{train_id} speed {speed} -> MTH lashup {mth_id} speed {dcs_speed}")
+            self.send_lashup_command(mth_id, mth_cmd)
+            return
+        
+        # Direction commands
+        if cmd_code == 0x100:  # Forward
+            logger.info(f"🚂 TR{train_id} forward -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "d0")
+            return
+        if cmd_code == 0x101:  # Toggle direction
+            logger.info(f"🚂 TR{train_id} toggle direction -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "d2")  # DCS toggle
+            return
+        if cmd_code == 0x103:  # Reverse
+            logger.info(f"🚂 TR{train_id} reverse -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "d1")
+            return
+        
+        # Boost/Brake
+        if cmd_code == 0x104:  # Boost
+            logger.info(f"🚂 TR{train_id} boost -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "s+5")  # Relative speed increase
+            return
+        if cmd_code == 0x107:  # Brake
+            logger.info(f"🚂 TR{train_id} brake -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "s-5")  # Relative speed decrease
+            return
+        
+        # Horn/Bell
+        if cmd_code == 0x11C:  # Horn 1
+            logger.info(f"🚂 TR{train_id} horn -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "w2")
+            return
+        if cmd_code == 0x11D:  # Bell
+            logger.info(f"🚂 TR{train_id} bell -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "w4")
+            return
+        
+        # Startup/Shutdown
+        if cmd_code == 0x1FB:  # Startup seq 1
+            logger.info(f"🚂 TR{train_id} startup -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "u4")
+            return
+        if cmd_code == 0x1FD:  # Shutdown seq 1
+            logger.info(f"🚂 TR{train_id} shutdown -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "u5")
+            return
+        
+        # Quilling horn (0x1E0-0x1EF)
+        if 0x1E0 <= cmd_code <= 0x1EF:
+            quill_level = cmd_code & 0x0F
+            logger.info(f"🚂 TR{train_id} quilling horn {quill_level} -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "w2")  # Just trigger horn for now
+            return
+        
+        logger.debug(f"🚂 TR{train_id} unhandled command 0x{cmd_code:03x}")
+    
+    def send_lashup_command(self, mth_id: int, mth_cmd: str):
+        """Send a command to an MTH lashup
+        
+        Args:
+            mth_id: MTH lashup ID (101-120)
+            mth_cmd: MTH command string (e.g., "s60", "d0", "w2")
+        """
+        if not self.mth_connected or not self.mth_socket:
+            logger.warning("⚠️ Cannot send lashup command: WTIU not connected")
+            return False
+        
+        try:
+            with self.mth_lock:
+                # Select the lashup first
+                # MTH lashup IDs 101-120 map to DCS engine numbers
+                select_cmd = f"y{mth_id}\r\n"
+                self.mth_socket.send(select_cmd.encode())
+                time.sleep(0.05)
+                
+                # Send the command
+                full_cmd = f"{mth_cmd}\r\n"
+                self.mth_socket.send(full_cmd.encode())
+                logger.info(f"🚂 Sent to MTH lashup {mth_id}: {mth_cmd}")
+                
+                # Get response
+                self.mth_socket.settimeout(1.0)
+                try:
+                    response = self.mth_socket.recv(256).decode()
+                    logger.debug(f"📥 Lashup response: {response.strip()}")
+                except socket.timeout:
+                    pass
+                
+                return True
+                
+        except Exception as e:
+            logger.error(f"❌ Lashup command error: {e}")
+            return False
     
     def _delayed_train_query(self, train_id: int, delay: float = 2.0):
         """Query Base 3 for train data after a delay"""
