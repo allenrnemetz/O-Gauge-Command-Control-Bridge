@@ -33,6 +33,30 @@ import json
 import os
 import queue
 from queue import Queue, Empty
+import struct
+
+# PDI Protocol Constants (from pytrain-ogr)
+PDI_SOP = 0xD1  # Start of Packet
+PDI_EOP = 0xDF  # End of Packet
+PDI_STF = 0xDE  # Stuff byte (escape)
+
+# PDI Command Types (from PyTrain constants.py)
+class PdiCommand:
+    BASE_ENGINE = 0x20
+    BASE_TRAIN = 0x21
+    BASE_ACC = 0x22
+    BASE_BASE = 0x23
+    BASE_ROUTE = 0x24
+    BASE_SWITCH = 0x25
+    BASE_MEMORY = 0x26
+    TMCC_TX = 0x27
+    TMCC_RX = 0x28
+    PING = 0x29
+
+# MTH Lashup ID Range (from Mark's RTC)
+MTH_LASHUP_MIN = 101
+MTH_LASHUP_MAX = 120
+MTH_LASHUP_DCS_NO = 102  # DCS engine number for lashups
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -349,6 +373,9 @@ class LegacyProtocolParser:
             0x2C: {'type': 'consist', 'value': 'clear'},          # 100101100 Clear Consist (Lash-Up)
             0x2D: {'type': 'sound', 'value': 'refuel'},           # 100101101 Locomotive Re-Fueling Sound
             
+            # Assign to Train (triggers PDI query for lashup contents)
+            0x30: {'type': 'consist', 'value': 'assign_to_train'},  # 100110000 Assign to Train
+            
             # Diesel Run Level (0x68-0x6F = levels 0-7)
             0x68: {'type': 'diesel_level', 'value': 0},           # 110100000 Diesel Run Level 0
             0x69: {'type': 'diesel_level', 'value': 1},           # 110100001 Diesel Run Level 1
@@ -504,6 +531,46 @@ class LegacyProtocolParser:
         
         return None
 
+    def parse_legacy_train_command(self, packet):
+        """Parse Legacy Train command (0xF9) - train/lashup commands"""
+        if len(packet) != 3:
+            return None
+        
+        word = (packet[1] << 8) | packet[2]
+        train_id = (word >> 9) & 0x7F
+        command = word & 0x1FF
+        
+        logger.info(f"🚂 Train Command: TR={train_id}, cmd=0x{command:03x}")
+        
+        # TMCC2 consist/lashup commands (from PyTrain tmcc2_constants.py)
+        # 0x12C = ASSIGN_CLEAR_CONSIST - clears the lashup
+        if command == 0x12C:
+            logger.info(f"🗑️ Lashup CLEAR command detected for TR{train_id}")
+            return {
+                'type': 'consist',
+                'value': 'clear',
+                'train_id': train_id,
+                'protocol': 'legacy_train'
+            }
+        
+        # 0x130 = ASSIGN_TO_TRAIN - engine assigned to train (lashup creation)
+        # This triggers a PDI query to get the full lashup contents
+        if command == 0x130:
+            logger.info(f"🔗 Lashup ASSIGN command detected for TR{train_id}")
+            return {
+                'type': 'consist',
+                'value': 'assign',
+                'train_id': train_id,
+                'protocol': 'legacy_train'
+            }
+        
+        return {
+            'type': 'train_command',
+            'train_id': train_id,
+            'command': command,
+            'protocol': 'legacy_train'
+        }
+
 class LegacySpeedManager:
     """Manage 200-step Legacy speed with fine-grained control"""
     def __init__(self):
@@ -576,6 +643,601 @@ class LegacySpeedManager:
             new_speed = current + effective_change
             
         return self.set_legacy_speed(engine, new_speed)
+
+class ConsistComponent:
+    """Represents an engine within a Lionel lashup (from pytrain-ogr)"""
+    
+    # Flag bit positions
+    UNIT_TYPE_MASK = 0x03      # Bits 0-1: unit type
+    DIRECTION_BIT = 0x04      # Bit 2: direction (0=fwd, 1=rev)
+    TRAIN_LINK_BIT = 0x08     # Bit 3: train-link
+    HORN_MASK_BIT = 0x10      # Bit 4: horn mask
+    DIALOG_MASK_BIT = 0x20    # Bit 5: dialog mask
+    TMCC2_BIT = 0x40          # Bit 6: TMCC2 capable
+    ACCESSORY_BIT = 0x80      # Bit 7: accessory
+    
+    # Unit types
+    SINGLE = 0
+    HEAD = 1
+    MIDDLE = 2
+    TAIL = 3
+    
+    def __init__(self, tmcc_id: int, flags: int = 0):
+        self.tmcc_id = tmcc_id
+        self.flags = flags
+    
+    @classmethod
+    def from_bytes(cls, data: bytes) -> list:
+        """Parse 32-byte consist block into list of ConsistComponents"""
+        components = []
+        for i in range(0, min(32, len(data)), 2):
+            if i + 1 < len(data):
+                if data[i] != 0xFF and data[i + 1] != 0xFF:
+                    components.insert(0, cls(tmcc_id=data[i + 1], flags=data[i]))
+        return components
+    
+    @property
+    def is_reversed(self) -> bool:
+        return bool(self.flags & self.DIRECTION_BIT)
+    
+    @property
+    def unit_type(self) -> int:
+        return self.flags & self.UNIT_TYPE_MASK
+    
+    def __repr__(self):
+        dir_str = "REV" if self.is_reversed else "FWD"
+        type_names = {0: "SINGLE", 1: "HEAD", 2: "MIDDLE", 3: "TAIL"}
+        return f"ConsistComponent(id={self.tmcc_id}, {type_names.get(self.unit_type, '?')}, {dir_str})"
+
+
+class LashupManager:
+    """Manages Lionel TR to MTH lashup ID mapping with persistent storage"""
+    
+    LASHUP_FILE = "lashup_mappings.json"
+    
+    def __init__(self, bridge):
+        self.bridge = bridge
+        self.tr_to_mth = {}           # {lionel_tr_id: mth_lashup_id}
+        self.mth_to_tr = {}           # {mth_lashup_id: lionel_tr_id}
+        self.lashup_engines = {}      # {lionel_tr_id: [engine_ids]}
+        self.mth_engines_in_lashup = {}  # {lionel_tr_id: [mth_engine_ids]}
+        self.available_mth_ids = list(range(MTH_LASHUP_MIN, MTH_LASHUP_MAX + 1))
+        self._load_mappings()
+    
+    def _load_mappings(self):
+        """Load persistent lashup mappings from file"""
+        try:
+            if os.path.exists(self.LASHUP_FILE):
+                with open(self.LASHUP_FILE, 'r') as f:
+                    data = json.load(f)
+                    self.tr_to_mth = {int(k): v for k, v in data.get('tr_to_mth', {}).items()}
+                    self.mth_to_tr = {int(k): v for k, v in data.get('mth_to_tr', {}).items()}
+                    self.lashup_engines = {int(k): v for k, v in data.get('lashup_engines', {}).items()}
+                    self.mth_engines_in_lashup = {int(k): v for k, v in data.get('mth_engines_in_lashup', {}).items()}
+                    # Update available IDs
+                    used_ids = set(self.tr_to_mth.values())
+                    self.available_mth_ids = [i for i in range(MTH_LASHUP_MIN, MTH_LASHUP_MAX + 1) if i not in used_ids]
+                    logger.info(f"🔗 Loaded {len(self.tr_to_mth)} lashup mappings from disk")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not load lashup mappings: {e}")
+    
+    def _save_mappings(self):
+        """Save lashup mappings to persistent storage"""
+        try:
+            data = {
+                'tr_to_mth': self.tr_to_mth,
+                'mth_to_tr': self.mth_to_tr,
+                'lashup_engines': self.lashup_engines,
+                'mth_engines_in_lashup': self.mth_engines_in_lashup
+            }
+            with open(self.LASHUP_FILE, 'w') as f:
+                json.dump(data, f, indent=2)
+            logger.info(f"💾 Saved {len(self.tr_to_mth)} lashup mappings to disk")
+        except Exception as e:
+            logger.error(f"❌ Could not save lashup mappings: {e}")
+    
+    def get_mth_lashup_id(self, tr_id: int) -> int:
+        """Get or allocate MTH lashup ID for a Lionel TR ID"""
+        if tr_id in self.tr_to_mth:
+            return self.tr_to_mth[tr_id]
+        
+        if not self.available_mth_ids:
+            logger.error("❌ No available MTH lashup IDs (101-120 all in use)")
+            return None
+        
+        mth_id = self.available_mth_ids.pop(0)
+        self.tr_to_mth[tr_id] = mth_id
+        self.mth_to_tr[mth_id] = tr_id
+        self._save_mappings()
+        logger.info(f"🔗 Allocated MTH lashup {mth_id} for Lionel TR{tr_id}")
+        return mth_id
+    
+    def has_mth_engines(self, engine_ids: list) -> bool:
+        """Check if any engines in the list are MTH engines"""
+        for eng_id in engine_ids:
+            if str(eng_id) in self.bridge.engine_mappings:
+                return True
+            if eng_id in self.bridge.discovered_mth_engines:
+                return True
+        return False
+    
+    def get_mth_engine_ids(self, engine_ids: list) -> list:
+        """Get list of MTH engine IDs from Lionel engine IDs"""
+        mth_ids = []
+        for eng_id in engine_ids:
+            if str(eng_id) in self.bridge.engine_mappings:
+                mth_ids.append(self.bridge.engine_mappings[str(eng_id)])
+            elif eng_id in self.bridge.discovered_mth_engines:
+                mth_ids.append(self.bridge.discovered_mth_engines[eng_id])
+        return mth_ids
+    
+    def update_lashup(self, tr_id: int, components: list):
+        """Update lashup with consist components from Base 3"""
+        engine_ids = [c.tmcc_id for c in components]
+        
+        if not self.has_mth_engines(engine_ids):
+            logger.info(f"🚂 TR{tr_id} has no MTH engines, skipping MTH lashup creation")
+            return False
+        
+        mth_engine_ids = self.get_mth_engine_ids(engine_ids)
+        if not mth_engine_ids:
+            logger.warning(f"⚠️ No MTH engine mappings found for TR{tr_id}")
+            return False
+        
+        self.lashup_engines[tr_id] = engine_ids
+        self.mth_engines_in_lashup[tr_id] = mth_engine_ids
+        
+        mth_lashup_id = self.get_mth_lashup_id(tr_id)
+        if mth_lashup_id is None:
+            return False
+        
+        # Build MTH engine list with direction flags
+        engine_list = self._build_mth_engine_list(components)
+        
+        # Send lashup creation command to WTIU
+        success = self.bridge.create_mth_lashup(mth_lashup_id, engine_list)
+        
+        if success:
+            self._save_mappings()
+            logger.info(f"✅ Created MTH lashup {mth_lashup_id} for TR{tr_id}: {engine_list}")
+        
+        return success
+    
+    def _build_mth_engine_list(self, components: list) -> str:
+        """Build MTH engine list string from consist components
+        
+        Format: ASCII hex of DCS engine numbers (Lionel + 1), high bit for reverse
+        Example: "0F8A" = engine 15 forward, engine 10 reverse
+        """
+        engine_list = ""
+        for comp in components:
+            mth_ids = self.get_mth_engine_ids([comp.tmcc_id])
+            if mth_ids:
+                dcs_id = mth_ids[0] + 1  # DCS engine = Lionel + 1
+                if comp.is_reversed:
+                    dcs_id |= 0x80  # Set high bit for reverse
+                engine_list += f"{dcs_id:02X}"
+        return engine_list
+    
+    def clear_lashup(self, tr_id: int):
+        """Clear a lashup and free the MTH ID"""
+        if tr_id not in self.tr_to_mth:
+            return
+        
+        mth_id = self.tr_to_mth[tr_id]
+        
+        # Clear from WTIU (just stop using it, no explicit clear needed)
+        logger.info(f"🗑️ Clearing lashup: TR{tr_id} -> MTH {mth_id}")
+        
+        # Free the MTH ID
+        del self.tr_to_mth[tr_id]
+        del self.mth_to_tr[mth_id]
+        if tr_id in self.lashup_engines:
+            del self.lashup_engines[tr_id]
+        if tr_id in self.mth_engines_in_lashup:
+            del self.mth_engines_in_lashup[tr_id]
+        
+        # Return ID to available pool
+        self.available_mth_ids.append(mth_id)
+        self.available_mth_ids.sort()
+        
+        self._save_mappings()
+    
+    def get_mth_id_for_tr(self, tr_id: int) -> int:
+        """Get MTH lashup ID for a Lionel TR ID (if exists)"""
+        return self.tr_to_mth.get(tr_id)
+
+
+class PdiClient:
+    """PDI client for querying Base 3 train data via WiFi (TCP port 50001)"""
+    
+    BASE3_PDI_PORT = 50001
+    
+    def __init__(self, bridge, base3_ip: str = None):
+        self.bridge = bridge
+        self.base3_ip = base3_ip or bridge.settings.get('base3_ip', None)
+        self.pdi_lock = Lock()
+        self.pdi_socket = None
+        self.connected = False
+        self.discovery_attempted = False
+    
+    def discover_base3_mdns(self) -> bool:
+        """Discover Base 3 IP via mDNS (Bonjour)"""
+        try:
+            from zeroconf import ServiceBrowser, Zeroconf
+            
+            class Base3Listener:
+                def __init__(self, pdi_client):
+                    self.pdi_client = pdi_client
+                
+                def add_service(self, zeroconf, service_type, name):
+                    info = zeroconf.get_service_info(service_type, name)
+                    if info:
+                        ip = '.'.join(str(b) for b in info.addresses[0]) if info.addresses else None
+                        if ip:
+                            self.pdi_client.base3_ip = ip
+                            logger.info(f"🔍 Discovered Base 3 at {ip}")
+                
+                def remove_service(self, zeroconf, service_type, name):
+                    pass
+                
+                def update_service(self, zeroconf, service_type, name):
+                    pass
+            
+            zeroconf = Zeroconf()
+            listener = Base3Listener(self)
+            
+            # Try Lionel Base 3 service name
+            browser = ServiceBrowser(zeroconf, "_lionel._tcp.local.", listener)
+            time.sleep(3)  # Wait for discovery
+            
+            zeroconf.close()
+            return self.base3_ip is not None
+            
+        except ImportError:
+            logger.info("⚠️ zeroconf not available for Base 3 discovery")
+            return False
+        except Exception as e:
+            logger.error(f"Base 3 mDNS discovery error: {e}")
+            return False
+    
+    def scan_for_base3(self) -> bool:
+        """Scan subnet for Base 3 PDI port (50001)"""
+        import socket
+        import concurrent.futures
+        
+        def check_ip(ip):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(0.3)
+                result = sock.connect_ex((ip, self.BASE3_PDI_PORT))
+                sock.close()
+                return ip if result == 0 else None
+            except:
+                return None
+        
+        # Scan 192.168.0.x and 192.168.1.x subnets
+        logger.info("🔍 Scanning subnet for Base 3 on port 50001...")
+        ips_to_scan = [f"192.168.0.{i}" for i in range(1, 255)]
+        ips_to_scan += [f"192.168.1.{i}" for i in range(1, 255)]
+        
+        # Use thread pool for faster scanning
+        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+            results = list(executor.map(check_ip, ips_to_scan))
+        
+        for ip in results:
+            if ip:
+                self.base3_ip = ip
+                logger.info(f"✅ Found Base 3 at {ip}:{self.BASE3_PDI_PORT}")
+                return True
+        
+        logger.warning("⚠️ Base 3 not found on subnet")
+        return False
+    
+    def connect(self) -> bool:
+        """Connect to Base 3 via WiFi TCP"""
+        import socket
+        
+        # Try mDNS discovery if no IP configured
+        if not self.base3_ip and not self.discovery_attempted:
+            self.discovery_attempted = True
+            logger.info("🔍 Attempting Base 3 mDNS discovery...")
+            if not self.discover_base3_mdns():
+                logger.info("⚠️ mDNS failed, trying port scan...")
+                if not self.scan_for_base3():
+                    logger.warning("⚠️ Base 3 not found, PDI queries disabled. Set 'base3_ip' in config.")
+                    return False
+        
+        if not self.base3_ip:
+            logger.warning("⚠️ No Base 3 IP configured, PDI queries disabled")
+            return False
+        
+        try:
+            self.pdi_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.pdi_socket.settimeout(5.0)
+            self.pdi_socket.connect((self.base3_ip, self.BASE3_PDI_PORT))
+            self.connected = True
+            logger.info(f"✅ Connected to Base 3 PDI at {self.base3_ip}:{self.BASE3_PDI_PORT}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to connect to Base 3 PDI: {e}")
+            self.connected = False
+            return False
+    
+    def disconnect(self):
+        """Disconnect from Base 3"""
+        if self.pdi_socket:
+            try:
+                self.pdi_socket.close()
+            except:
+                pass
+            self.pdi_socket = None
+        self.connected = False
+    
+    @staticmethod
+    def _calculate_checksum_and_stuff(data: bytes) -> tuple:
+        """Calculate PDI checksum and apply byte stuffing (PyTrain's exact method)
+        
+        Returns: (stuffed_data, checksum_byte)
+        """
+        byte_stream = bytearray()
+        check_sum = 0
+        
+        for b in data:
+            check_sum += b
+            if b in (PDI_SOP, PDI_STF, PDI_EOP):
+                # Add stuff byte and account for it in checksum
+                check_sum += PDI_STF
+                byte_stream.append(PDI_STF)
+            byte_stream.append(b)
+        
+        # Two's complement checksum
+        byte_sum = check_sum
+        check_sum = 0xFF & (0 - check_sum)
+        
+        # If checksum itself needs stuffing
+        if check_sum in (PDI_SOP, PDI_STF, PDI_EOP):
+            byte_stream.append(PDI_STF)
+            byte_sum += PDI_STF
+            check_sum = 0xFF & (0 - byte_sum)
+        
+        return bytes(byte_stream), bytes([check_sum])
+    
+    @staticmethod
+    def _unstuff_bytes(data: bytes) -> bytes:
+        """Remove PDI byte stuffing"""
+        result = bytearray()
+        i = 0
+        while i < len(data):
+            if data[i] == PDI_STF and i + 1 < len(data):
+                result.append(data[i + 1] ^ 0x80)
+                i += 2
+            else:
+                result.append(data[i])
+                i += 1
+        return bytes(result)
+    
+    @staticmethod
+    def _verify_checksum(data: bytes) -> bool:
+        """Verify PDI checksum (two's complement - sum of all bytes should be 0)"""
+        return (sum(data) & 0xFF) == 0
+    
+    def build_train_read_request(self, train_id: int) -> bytes:
+        """Build PDI request to read train data from Base 3"""
+        # PDI BASE_TRAIN read request
+        # Format: SOP, stuffed(command + train_id + action), checksum, EOP
+        # Action 0x03 = CONFIG (read)
+        ACTION_CONFIG = 0x03
+        payload = bytes([PdiCommand.BASE_TRAIN, train_id, ACTION_CONFIG])
+        stuffed, checksum = self._calculate_checksum_and_stuff(payload)
+        return bytes([PDI_SOP]) + stuffed + checksum + bytes([PDI_EOP])
+    
+    def query_train_data_ser2(self, train_id: int, timeout: float = 3.0) -> dict:
+        """Query Base 3 for train data via SER2 serial port
+        
+        Returns dict with:
+        - consist_flags: byte at offset 0x6F
+        - consist_components: list of ConsistComponent from offset 0x70
+        """
+        with self.pdi_lock:
+            if not self.bridge.lionel_serial or not self.bridge.lionel_serial.is_open:
+                logger.error("❌ Cannot query PDI: serial not connected")
+                return None
+            
+            try:
+                # Build request
+                request = self.build_train_read_request(train_id)
+                logger.info(f"📡 PDI SER2: Querying train {train_id}: {request.hex()}")
+                
+                with self.bridge.lionel_lock:
+                    # Flush input buffer
+                    self.bridge.lionel_serial.reset_input_buffer()
+                    
+                    # Send PDI request via SER2
+                    self.bridge.lionel_serial.write(request)
+                    self.bridge.lionel_serial.flush()
+                    
+                    # Wait for response
+                    start_time = time.time()
+                    response_data = bytearray()
+                    in_packet = False
+                    
+                    while time.time() - start_time < timeout:
+                        if self.bridge.lionel_serial.in_waiting > 0:
+                            raw_bytes = self.bridge.lionel_serial.read(self.bridge.lionel_serial.in_waiting)
+                            logger.info(f"📡 PDI SER2: Received {len(raw_bytes)} bytes: {raw_bytes.hex()}")
+                            
+                            for b in raw_bytes:
+                                if b == PDI_SOP:
+                                    in_packet = True
+                                    response_data = bytearray()
+                                elif b == PDI_EOP and in_packet:
+                                    # Complete packet received
+                                    logger.info(f"📡 PDI SER2: Complete packet: {response_data.hex()}")
+                                    return self._parse_train_response(response_data)
+                                elif in_packet:
+                                    response_data.append(b)
+                        else:
+                            time.sleep(0.01)
+                    
+                    if response_data:
+                        logger.warning(f"⚠️ PDI SER2: Incomplete packet: {response_data.hex()}")
+                    else:
+                        logger.warning(f"⚠️ PDI SER2: Timeout - no PDI response for train {train_id}")
+                    return None
+                    
+            except Exception as e:
+                logger.error(f"❌ PDI SER2 query error: {e}")
+                return None
+    
+    def query_train_data(self, train_id: int, timeout: float = 3.0) -> dict:
+        """Query Base 3 for train data - tries SER2 first, then WiFi TCP
+        
+        Returns dict with:
+        - consist_flags: byte at offset 0x6F
+        - consist_components: list of ConsistComponent from offset 0x70
+        """
+        # Try SER2 first (no network config needed)
+        result = self.query_train_data_ser2(train_id, timeout)
+        if result:
+            return result
+        
+        # Fall back to WiFi TCP if SER2 didn't work
+        logger.info("📡 PDI: SER2 query failed, trying WiFi TCP...")
+        
+        # Reset discovery flag to allow retry with subnet scan
+        if not self.base3_ip:
+            self.discovery_attempted = False
+        
+        with self.pdi_lock:
+            # Connect if not already connected
+            if not self.connected:
+                if not self.connect():
+                    return None
+            
+            try:
+                # Build request
+                request = self.build_train_read_request(train_id)
+                
+                # Base 3 WiFi uses ASCII hex encoding (like PyTrain)
+                ascii_request = request.hex().upper()
+                logger.info(f"📡 PDI WiFi: Querying train {train_id}: {ascii_request}")
+                
+                # Send request
+                self.pdi_socket.sendall(ascii_request.encode())
+                
+                # Wait for response (ASCII hex encoded)
+                self.pdi_socket.settimeout(timeout)
+                response_hex = self.pdi_socket.recv(1024).decode(errors='ignore')
+                
+                if not response_hex:
+                    logger.warning(f"⚠️ PDI WiFi: No response for train {train_id}")
+                    return None
+                
+                logger.info(f"📡 PDI WiFi: Raw response: {response_hex[:100]}...")
+                
+                # Decode ASCII hex to bytes
+                try:
+                    response_bytes = bytes.fromhex(response_hex)
+                except ValueError as e:
+                    logger.warning(f"⚠️ PDI WiFi: Invalid hex response: {e}")
+                    return None
+                
+                # Response may contain multiple PDI packets - find the BASE_TRAIN response
+                # Look for D1 21 3C (SOP + BASE_TRAIN + train_id) followed by action 0x02 (read response)
+                train_packet = self._extract_train_packet(response_bytes, train_id)
+                if train_packet:
+                    return self._parse_train_response(train_packet)
+                else:
+                    logger.warning(f"⚠️ PDI WiFi: No train data packet found in response")
+                    return None
+                    
+            except Exception as e:
+                logger.error(f"❌ PDI WiFi query error: {e}")
+                self.disconnect()
+                return None
+    
+    def _extract_train_packet(self, data: bytes, train_id: int) -> bytes:
+        """Extract the BASE_TRAIN response packet from concatenated PDI packets
+        
+        Response format: D1 21 <train_id> 02 <data...> <checksum> DF
+        Action 0x02 = read response (vs 0x03 = read request)
+        """
+        logger.info(f"📡 PDI: Looking for train {train_id} (0x{train_id:02x}) in {len(data)} bytes")
+        i = 0
+        while i < len(data) - 4:
+            # Look for SOP + BASE_TRAIN + train_id + action 0x02 (read response)
+            if data[i] == PDI_SOP:
+                logger.debug(f"📡 PDI: Found SOP at {i}, next bytes: {data[i:i+5].hex()}")
+            if (data[i] == PDI_SOP and 
+                data[i+1] == PdiCommand.BASE_TRAIN and 
+                data[i+2] == train_id and 
+                data[i+3] == 0x02):
+                logger.info(f"📡 PDI: Found train packet header at offset {i}")
+                # Found the start of our packet - find the EOP
+                for j in range(i+4, len(data)):
+                    if data[j] == PDI_EOP:
+                        # Check if preceded by stuff byte
+                        if j > 0 and data[j-1] == PDI_STF:
+                            continue  # This EOP is stuffed, keep looking
+                        # Found complete packet
+                        packet = data[i+1:j]  # Exclude SOP and EOP
+                        logger.info(f"📡 PDI: Extracted train packet: {len(packet)} bytes")
+                        return packet
+            i += 1
+        logger.warning(f"📡 PDI: No matching packet found for train {train_id}")
+        return None
+    
+    def _parse_train_response(self, data: bytes) -> dict:
+        """Parse PDI train response data"""
+        try:
+            # Unstuff the data
+            unstuffed = self._unstuff_bytes(data)
+            
+            if len(unstuffed) < 3:
+                logger.warning(f"⚠️ PDI response too short: {len(unstuffed)} bytes")
+                return None
+            
+            # Verify checksum (two's complement - sum should be 0)
+            if not self._verify_checksum(unstuffed):
+                logger.warning(f"⚠️ PDI checksum failed for response: {unstuffed.hex()}")
+                return None
+            
+            # Skip header: cmd(1) + train_id(1) + action(1) = 3 bytes, remove checksum
+            record_data = unstuffed[3:-1]
+            
+            logger.info(f"📡 PDI: Train record {len(record_data)} bytes")
+            
+            result = {
+                'raw_data': record_data,
+                'consist_flags': None,
+                'consist_components': []
+            }
+            
+            # PyTrain offsets are from full packet, adjust by -3 for header
+            # consist_flags at [69] -> offset 66 in record_data
+            # consist_components at [70:102] -> offset 67:99 in record_data
+            if len(record_data) > 66:
+                result['consist_flags'] = record_data[66]
+                logger.info(f"📡 PDI: Consist flags = 0x{result['consist_flags']:02x}")
+            
+            # Extract consist components (32 bytes = 16 engine slots)
+            if len(record_data) >= 99:
+                consist_block = record_data[67:99]
+                logger.info(f"📡 PDI: Consist block: {consist_block.hex()}")
+                result['consist_components'] = ConsistComponent.from_bytes(consist_block)
+                logger.info(f"🔗 PDI: Found {len(result['consist_components'])} consist components")
+                for comp in result['consist_components']:
+                    logger.info(f"   🚂 Engine {comp.tmcc_id}: flags=0x{comp.flags:02x}")
+            else:
+                logger.info(f"📡 PDI: Record has {len(record_data)} bytes (need 99+ for consist)")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ PDI parse error: {e}")
+            return None
+
 
 class LionelMTHBridge:
     def __init__(self):
@@ -731,6 +1393,12 @@ class LionelMTHBridge:
         
         # Track which engines support Legacy
         self.legacy_capable_engines = set()
+        
+        # Lashup management (PDI client and TR-to-MTH mapping)
+        self.pdi_client = PdiClient(self)
+        self.lashup_manager = LashupManager(self)
+        self.pending_train_queries = set()
+        self.queried_trains = set()  # TR IDs we've already queried (no need to re-query)  # Train IDs to query after lashup commands
         
     def wait_for_lionel_connection(self):
         """Wait for SER2 to be available and connect"""
@@ -2436,6 +3104,144 @@ class LionelMTHBridge:
             logger.error(f"❌ Command send error: {e}")
             return False
     
+    def create_mth_lashup(self, mth_lashup_id: int, engine_list: str) -> bool:
+        """Create MTH lashup on WTIU
+        
+        Args:
+            mth_lashup_id: MTH lashup ID (101-120)
+            engine_list: ASCII hex string of DCS engine numbers (e.g., "0F8A")
+        
+        Returns:
+            True if lashup created successfully
+        """
+        if not self.mth_connected or not self.mth_socket:
+            logger.warning("⚠️ Cannot create MTH lashup: WTIU not connected")
+            return False
+        
+        try:
+            with self.mth_lock:
+                lashup_cmd = f"U{engine_list}"
+                logger.info(f"🔗 Creating MTH lashup {mth_lashup_id}: {lashup_cmd}")
+                
+                full_cmd = f"{lashup_cmd}\r\n".encode()
+                self.mth_socket.send(full_cmd)
+                
+                self.mth_socket.settimeout(3.0)
+                try:
+                    response = self.mth_socket.recv(256).decode()
+                    logger.info(f"📥 Lashup creation response: {response.strip()}")
+                    
+                    if "okay" in response.lower() or response.strip():
+                        logger.info(f"✅ MTH lashup {mth_lashup_id} created successfully")
+                        return True
+                    else:
+                        logger.warning(f"⚠️ Unexpected lashup response: {response}")
+                        return False
+                        
+                except socket.timeout:
+                    logger.warning("⚠️ Lashup creation timeout (may still have succeeded)")
+                    return True
+                    
+        except Exception as e:
+            logger.error(f"❌ MTH lashup creation error: {e}")
+            return False
+    
+    def handle_lashup_command(self, command: dict) -> bool:
+        """Handle lashup-related commands from Lionel
+        
+        Detects consist assignment commands and triggers PDI query to Base 3.
+        Returns True if this was a lashup command that was handled.
+        """
+        cmd_type = command.get('type')
+        cmd_value = command.get('value')
+        engine = command.get('engine', 0)
+        
+        if cmd_type == 'consist':
+            train_id = command.get('train_id', 0)
+            logger.info(f"🔗 Lashup command detected: {cmd_value} for TR{train_id}")
+            
+            if cmd_value == 'clear' and train_id > 0:
+                # Clear command received for this train - clear the MTH lashup
+                if self.lashup_manager.get_mth_id_for_tr(train_id):
+                    self.lashup_manager.clear_lashup(train_id)
+                    logger.info(f"🗑️ Cleared MTH lashup for TR{train_id}")
+                else:
+                    logger.info(f"📡 TR{train_id} clear received but no MTH lashup exists")
+                # Remove from queried set so next command will trigger a new PDI query
+                self.queried_trains.discard(train_id)
+                return True
+            
+            if cmd_value == 'assign' and train_id > 0:
+                # Assign command from train parser - query Base 3 for lashup contents
+                logger.info(f"🔗 Lashup assign for TR{train_id} - scheduling PDI query")
+                self.pending_train_queries.add(train_id)
+                threading.Thread(
+                    target=self._delayed_train_query,
+                    args=(train_id,),
+                    daemon=True
+                ).start()
+                return True
+            
+            # Position assignment commands (single/head/middle/rear) or assign_to_train
+            # These come from engine commands (0xF8) with the engine being assigned
+            engine = command.get('engine', 0)
+            if cmd_value in ('single_fwd', 'single_rev', 'head_fwd', 'head_rev', 
+                            'middle_fwd', 'middle_rev', 'rear_fwd', 'rear_rev', 
+                            'assign_to_train') and engine > 0:
+                # Engine is being assigned to a train - we need to find which train
+                # The train ID comes in a subsequent ASSIGN_TO_TRAIN command with the train number
+                # For now, just log it - the actual PDI query will be triggered by ASSIGN_TO_TRAIN
+                logger.info(f"🔗 Engine {engine} position assignment: {cmd_value}")
+                return True
+            
+            return True
+        
+        if cmd_type == 'train_command':
+            # Train commands - query PDI once per TR ID to check for MTH engines
+            train_id = command.get('train_id', 0)
+            if train_id > 0:
+                mth_id = self.lashup_manager.get_mth_id_for_tr(train_id)
+                if mth_id:
+                    logger.info(f"🚂 Train command for TR{train_id} -> MTH lashup {mth_id}")
+                    # TODO: Forward command to MTH lashup
+                elif train_id not in self.queried_trains and train_id not in self.pending_train_queries:
+                    # First command to this TR ID - query PDI to check for MTH engines
+                    logger.info(f"🔗 New TR{train_id} detected - scheduling PDI query")
+                    self.pending_train_queries.add(train_id)
+                    threading.Thread(
+                        target=self._delayed_train_query,
+                        args=(train_id,),
+                        daemon=True
+                    ).start()
+            return True
+        
+        return False
+    
+    def _delayed_train_query(self, train_id: int, delay: float = 2.0):
+        """Query Base 3 for train data after a delay"""
+        time.sleep(delay)
+        
+        if train_id not in self.pending_train_queries:
+            return
+        
+        self.pending_train_queries.discard(train_id)
+        
+        logger.info(f"📡 Querying Base 3 for TR{train_id} lashup data...")
+        train_data = self.pdi_client.query_train_data(train_id)
+        
+        # Mark this TR ID as queried (won't query again unless cleared)
+        self.queried_trains.add(train_id)
+        
+        if train_data and train_data.get('consist_components'):
+            components = train_data['consist_components']
+            logger.info(f"🔗 TR{train_id} has {len(components)} engines: {components}")
+            self.lashup_manager.update_lashup(train_id, components)
+        elif train_data:
+            # Query succeeded but no consist components - not a lashup or empty
+            logger.info(f"📡 TR{train_id} has no consist data (not a lashup with engines)")
+        else:
+            logger.info(f"📡 TR{train_id} PDI query failed")
+    
     def send_to_mth(self, command):
         """Send command to MTH WTIU via WiFi with proper sequence"""
         if not self.mth_connected or not self.mth_socket:
@@ -2755,8 +3561,13 @@ class LionelMTHBridge:
                                         protocol = command.get('protocol', 'tmcc1')
                                         logger.info(f"📤 {protocol.upper()}: {command.get('type')} = {command.get('value')}")
                                         
+                                        # Check for lashup commands first
+                                        if self.handle_lashup_command(command):
+                                            logger.info("🔗 Lashup command handled")
+                                            continue
+                                        
                                         # Use Legacy-aware sending for Legacy commands
-                                        if protocol == 'legacy':
+                                        if protocol in ('legacy', 'legacy_train'):
                                             if self.send_to_mth_with_legacy(command):
                                                 logger.info("✅ Legacy → MTH")
                                         else:
