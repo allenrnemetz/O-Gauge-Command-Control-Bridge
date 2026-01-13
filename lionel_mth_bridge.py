@@ -54,7 +54,8 @@ class PdiCommand:
     PING = 0x29
 
 # MTH Lashup ID Range (from Mark's RTC)
-MTH_LASHUP_MIN = 101
+# PC-controlled lashups use IDs 102-120 (101 is reserved for DCS remote)
+MTH_LASHUP_MIN = 102
 MTH_LASHUP_MAX = 120
 MTH_LASHUP_DCS_NO = 102  # DCS engine number for lashups
 
@@ -701,6 +702,7 @@ class LashupManager:
         self.mth_to_tr = {}           # {mth_lashup_id: lionel_tr_id}
         self.lashup_engines = {}      # {lionel_tr_id: [engine_ids]}
         self.mth_engines_in_lashup = {}  # {lionel_tr_id: [mth_engine_ids]}
+        self.engine_list_strings = {}  # {lionel_tr_id: engine_list_hex_string}
         self.available_mth_ids = list(range(MTH_LASHUP_MIN, MTH_LASHUP_MAX + 1))
         self._load_mappings()
     
@@ -736,16 +738,40 @@ class LashupManager:
         except Exception as e:
             logger.error(f"❌ Could not save lashup mappings: {e}")
     
-    def get_mth_lashup_id(self, tr_id: int) -> int:
-        """Get or allocate MTH lashup ID for a Lionel TR ID"""
-        if tr_id in self.tr_to_mth:
+    def get_mth_lashup_id(self, tr_id: int, force_new: bool = False) -> int:
+        """Get or allocate MTH lashup ID for a Lionel TR ID
+        
+        Args:
+            tr_id: Lionel TR ID
+            force_new: If True, allocate a new lashup ID even if one exists
+                      (used to bypass WTIU cache when recreating lashup)
+        """
+        if tr_id in self.tr_to_mth and not force_new:
             return self.tr_to_mth[tr_id]
         
-        if not self.available_mth_ids:
-            logger.error("❌ No available MTH lashup IDs (101-120 all in use)")
-            return None
+        # If forcing new, release the old ID first
+        if tr_id in self.tr_to_mth and force_new:
+            old_id = self.tr_to_mth[tr_id]
+            del self.mth_to_tr[old_id]
+            del self.tr_to_mth[tr_id]
+            # Track recycled IDs - they go to the end of the queue
+            # WTIU cache should be stale by the time we cycle back to them
+            if not hasattr(self, '_recycled_ids'):
+                self._recycled_ids = []
+            self._recycled_ids.append(old_id)
+            logger.info(f"🔗 Released MTH lashup {old_id} for TR{tr_id} (recycled to end of queue)")
         
-        mth_id = self.available_mth_ids.pop(0)
+        if not self.available_mth_ids:
+            # Try to use recycled IDs if available
+            if hasattr(self, '_recycled_ids') and self._recycled_ids:
+                mth_id = self._recycled_ids.pop(0)
+                logger.info(f"🔗 Reusing recycled MTH lashup ID {mth_id}")
+            else:
+                logger.error("❌ No available MTH lashup IDs (102-120 all in use)")
+                return None
+        else:
+            mth_id = self.available_mth_ids.pop(0)
+        
         self.tr_to_mth[tr_id] = mth_id
         self.mth_to_tr[mth_id] = tr_id
         self._save_mappings()
@@ -754,11 +780,17 @@ class LashupManager:
     
     def has_mth_engines(self, engine_ids: list) -> bool:
         """Check if any engines in the list are MTH engines"""
+        logger.info(f"🔍 has_mth_engines checking {engine_ids}")
+        logger.info(f"🔍 engine_mappings: {self.bridge.engine_mappings}")
+        logger.info(f"🔍 discovered_mth_engines: {self.bridge.discovered_mth_engines}")
         for eng_id in engine_ids:
             if str(eng_id) in self.bridge.engine_mappings:
+                logger.info(f"🔍 Found {eng_id} in engine_mappings")
                 return True
-            if eng_id in self.bridge.discovered_mth_engines:
+            if str(eng_id) in self.bridge.discovered_mth_engines:
+                logger.info(f"🔍 Found {eng_id} in discovered_mth_engines")
                 return True
+        logger.info(f"🔍 No MTH engines found for {engine_ids}")
         return False
     
     def get_mth_engine_ids(self, engine_ids: list) -> list:
@@ -767,67 +799,124 @@ class LashupManager:
         for eng_id in engine_ids:
             if str(eng_id) in self.bridge.engine_mappings:
                 mth_ids.append(self.bridge.engine_mappings[str(eng_id)])
-            elif eng_id in self.bridge.discovered_mth_engines:
-                mth_ids.append(self.bridge.discovered_mth_engines[eng_id])
+            elif str(eng_id) in self.bridge.discovered_mth_engines:
+                mth_ids.append(self.bridge.discovered_mth_engines[str(eng_id)])
         return mth_ids
     
     def update_lashup(self, tr_id: int, components: list):
-        """Update lashup with consist components from Base 3"""
+        """Update lashup with consist components from Base 3
+        
+        Supports mixed Lionel/MTH lashups:
+        - Only MTH engines are sent to WTIU for MTH lashup creation
+        - Lionel engines are ignored (Base 3 handles them directly)
+        - Lashup mapping is created so TR commands get forwarded to MTH engines
+        """
         engine_ids = [c.tmcc_id for c in components]
         
+        # Check if ANY engines in the consist are MTH
         if not self.has_mth_engines(engine_ids):
             logger.info(f"🚂 TR{tr_id} has no MTH engines, skipping MTH lashup creation")
             return False
         
+        # Get only the MTH engine IDs (Lionel-only engines will be filtered out)
         mth_engine_ids = self.get_mth_engine_ids(engine_ids)
         if not mth_engine_ids:
             logger.warning(f"⚠️ No MTH engine mappings found for TR{tr_id}")
             return False
         
+        # Log mixed lashup info
+        lionel_only_engines = [e for e in engine_ids if str(e) not in self.bridge.engine_mappings 
+                              and str(e) not in self.bridge.discovered_mth_engines]
+        if lionel_only_engines:
+            logger.info(f"🚂 TR{tr_id} is MIXED lashup: MTH engines {mth_engine_ids}, Lionel-only engines {lionel_only_engines}")
+            logger.info(f"🚂 Base 3 will handle Lionel engines, WTIU will handle MTH engines")
+        
         self.lashup_engines[tr_id] = engine_ids
         self.mth_engines_in_lashup[tr_id] = mth_engine_ids
         
-        mth_lashup_id = self.get_mth_lashup_id(tr_id)
+        # Always force a new lashup ID to bypass WTIU cache
+        # The WTIU caches lashup configurations and doesn't update them
+        # when we send a new U command with the same lashup ID
+        mth_lashup_id = self.get_mth_lashup_id(tr_id, force_new=True)
         if mth_lashup_id is None:
             return False
         
-        # Build MTH engine list with direction flags
+        # Build MTH engine list with direction flags (only MTH engines included)
         engine_list = self._build_mth_engine_list(components)
+        self.engine_list_strings[tr_id] = engine_list  # Store for regular commands
+        
+        if not engine_list:
+            logger.warning(f"⚠️ No MTH engines to include in lashup for TR{tr_id}")
+            return False
         
         # Send lashup creation command to WTIU
         success = self.bridge.create_mth_lashup(mth_lashup_id, engine_list)
         
         if success:
             self._save_mappings()
-            logger.info(f"✅ Created MTH lashup {mth_lashup_id} for TR{tr_id}: {engine_list}")
+            if lionel_only_engines:
+                logger.info(f"✅ Created MIXED MTH lashup {mth_lashup_id} for TR{tr_id}: MTH engines only: {engine_list}")
+            else:
+                logger.info(f"✅ Created MTH lashup {mth_lashup_id} for TR{tr_id}: {engine_list}")
         
         return success
     
     def _build_mth_engine_list(self, components: list) -> str:
         """Build MTH engine list string from consist components
         
-        Format: ASCII hex of DCS engine numbers (Lionel + 1), high bit for reverse
-        Example: "0F8A" = engine 15 forward, engine 10 reverse
+        From Mark's LashUp_Selection.cpp (DCS V6 format):
+        
+        LashUpCommand[EngIndex++] = 0x2C;           // comma prefix
+        for each engine:
+            iEng++;                                  // convert to DCS Engine Number (Lionel + 1)
+            if (val < 0) iEng |= 0x80;              // reverse bit
+            sprintf(&LashUpCommand[EngIndex], "%02X", iEng);  // 2 ASCII hex chars
+        LashUpCommand[EngIndex++] = 0xFF;           // terminator
+        
+        Result format: ",<hex><hex>...ÿ" where each engine is 2 ASCII hex digits
+        Example: ",0D13ÿ" = comma, engine 13 (0x0D), engine 19 (0x13), 0xFF terminator
+        
+        U command uses LashUpEngineList + 1 (skips comma)
+        Other lashup commands prepend "|" and use full list with comma
         """
-        engine_list = ""
+        # Start with comma (0x2C) - will be skipped for U command
+        engine_list = chr(0x2C)
+        
         for comp in components:
             mth_ids = self.get_mth_engine_ids([comp.tmcc_id])
             if mth_ids:
-                dcs_id = mth_ids[0] + 1  # DCS engine = Lionel + 1
+                # mth_ids[0] is already the MTH engine number (Lionel + 1)
+                # Per Mark's code: iEng++ converts Lionel to DCS engine number
+                # But our discovered_mth_engines already stores DCS engine numbers
+                dcs_id = mth_ids[0]
                 if comp.is_reversed:
                     dcs_id |= 0x80  # Set high bit for reverse
+                # sprintf("%02X", iEng) - 2 ASCII hex characters
                 engine_list += f"{dcs_id:02X}"
+                logger.info(f"🔗 Engine {comp.tmcc_id} -> DCS {dcs_id & 0x7F} {'REV' if comp.is_reversed else 'FWD'} (0x{dcs_id:02X})")
+        
+        # Add 0xFF terminator (required per Mark's code)
+        engine_list += chr(0xFF)
+        
+        logger.info(f"🔗 Built engine list: {repr(engine_list)} = {' '.join(f'{ord(c):02X}' for c in engine_list)}")
+        
         return engine_list
     
-    def clear_lashup(self, tr_id: int):
-        """Clear a lashup and free the MTH ID"""
+    def clear_lashup(self, tr_id: int) -> list:
+        """Clear a lashup and free the MTH ID
+        
+        Returns:
+            List of MTH engine IDs that were in the lashup (for sending m4 commands)
+        """
         if tr_id not in self.tr_to_mth:
-            return
+            return []
         
         mth_id = self.tr_to_mth[tr_id]
         
-        # Clear from WTIU (just stop using it, no explicit clear needed)
-        logger.info(f"🗑️ Clearing lashup: TR{tr_id} -> MTH {mth_id}")
+        # Get the list of MTH engines before clearing (for m4 commands)
+        mth_engines = self.mth_engines_in_lashup.get(tr_id, []).copy()
+        
+        logger.info(f"🗑️ Clearing lashup: TR{tr_id} -> MTH {mth_id}, engines: {mth_engines}")
         
         # Free the MTH ID
         del self.tr_to_mth[tr_id]
@@ -836,143 +925,32 @@ class LashupManager:
             del self.lashup_engines[tr_id]
         if tr_id in self.mth_engines_in_lashup:
             del self.mth_engines_in_lashup[tr_id]
+        if tr_id in self.engine_list_strings:
+            del self.engine_list_strings[tr_id]
         
         # Return ID to available pool
         self.available_mth_ids.append(mth_id)
         self.available_mth_ids.sort()
         
         self._save_mappings()
+        
+        return mth_engines
     
     def get_mth_id_for_tr(self, tr_id: int) -> int:
         """Get MTH lashup ID for a Lionel TR ID (if exists)"""
         return self.tr_to_mth.get(tr_id)
+    
+    def get_engine_list_for_tr(self, tr_id: int) -> str:
+        """Get the engine list hex string for a Lionel TR ID"""
+        return self.engine_list_strings.get(tr_id, "")
 
 
 class PdiClient:
-    """PDI client for querying Base 3 train data via WiFi (TCP port 50001)"""
+    """PDI client for querying Base 3 train data via SER2 serial port only"""
     
-    BASE3_PDI_PORT = 50001
-    
-    def __init__(self, bridge, base3_ip: str = None):
+    def __init__(self, bridge):
         self.bridge = bridge
-        self.base3_ip = base3_ip or bridge.settings.get('base3_ip', None)
         self.pdi_lock = Lock()
-        self.pdi_socket = None
-        self.connected = False
-        self.discovery_attempted = False
-    
-    def discover_base3_mdns(self) -> bool:
-        """Discover Base 3 IP via mDNS (Bonjour)"""
-        try:
-            from zeroconf import ServiceBrowser, Zeroconf
-            
-            class Base3Listener:
-                def __init__(self, pdi_client):
-                    self.pdi_client = pdi_client
-                
-                def add_service(self, zeroconf, service_type, name):
-                    info = zeroconf.get_service_info(service_type, name)
-                    if info:
-                        ip = '.'.join(str(b) for b in info.addresses[0]) if info.addresses else None
-                        if ip:
-                            self.pdi_client.base3_ip = ip
-                            logger.info(f"🔍 Discovered Base 3 at {ip}")
-                
-                def remove_service(self, zeroconf, service_type, name):
-                    pass
-                
-                def update_service(self, zeroconf, service_type, name):
-                    pass
-            
-            zeroconf = Zeroconf()
-            listener = Base3Listener(self)
-            
-            # Try Lionel Base 3 service name
-            browser = ServiceBrowser(zeroconf, "_lionel._tcp.local.", listener)
-            time.sleep(3)  # Wait for discovery
-            
-            zeroconf.close()
-            return self.base3_ip is not None
-            
-        except ImportError:
-            logger.info("⚠️ zeroconf not available for Base 3 discovery")
-            return False
-        except Exception as e:
-            logger.error(f"Base 3 mDNS discovery error: {e}")
-            return False
-    
-    def scan_for_base3(self) -> bool:
-        """Scan subnet for Base 3 PDI port (50001)"""
-        import socket
-        import concurrent.futures
-        
-        def check_ip(ip):
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(0.3)
-                result = sock.connect_ex((ip, self.BASE3_PDI_PORT))
-                sock.close()
-                return ip if result == 0 else None
-            except:
-                return None
-        
-        # Scan 192.168.0.x and 192.168.1.x subnets
-        logger.info("🔍 Scanning subnet for Base 3 on port 50001...")
-        ips_to_scan = [f"192.168.0.{i}" for i in range(1, 255)]
-        ips_to_scan += [f"192.168.1.{i}" for i in range(1, 255)]
-        
-        # Use thread pool for faster scanning
-        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
-            results = list(executor.map(check_ip, ips_to_scan))
-        
-        for ip in results:
-            if ip:
-                self.base3_ip = ip
-                logger.info(f"✅ Found Base 3 at {ip}:{self.BASE3_PDI_PORT}")
-                return True
-        
-        logger.warning("⚠️ Base 3 not found on subnet")
-        return False
-    
-    def connect(self) -> bool:
-        """Connect to Base 3 via WiFi TCP"""
-        import socket
-        
-        # Try mDNS discovery if no IP configured
-        if not self.base3_ip and not self.discovery_attempted:
-            self.discovery_attempted = True
-            logger.info("🔍 Attempting Base 3 mDNS discovery...")
-            if not self.discover_base3_mdns():
-                logger.info("⚠️ mDNS failed, trying port scan...")
-                if not self.scan_for_base3():
-                    logger.warning("⚠️ Base 3 not found, PDI queries disabled. Set 'base3_ip' in config.")
-                    return False
-        
-        if not self.base3_ip:
-            logger.warning("⚠️ No Base 3 IP configured, PDI queries disabled")
-            return False
-        
-        try:
-            self.pdi_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.pdi_socket.settimeout(5.0)
-            self.pdi_socket.connect((self.base3_ip, self.BASE3_PDI_PORT))
-            self.connected = True
-            logger.info(f"✅ Connected to Base 3 PDI at {self.base3_ip}:{self.BASE3_PDI_PORT}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Failed to connect to Base 3 PDI: {e}")
-            self.connected = False
-            return False
-    
-    def disconnect(self):
-        """Disconnect from Base 3"""
-        if self.pdi_socket:
-            try:
-                self.pdi_socket.close()
-            except:
-                pass
-            self.pdi_socket = None
-        self.connected = False
     
     @staticmethod
     def _calculate_checksum_and_stuff(data: bytes) -> tuple:
@@ -1067,6 +1045,9 @@ class PdiClient:
                             raw_bytes = self.bridge.lionel_serial.read(self.bridge.lionel_serial.in_waiting)
                             logger.info(f"📡 PDI SER2: Received {len(raw_bytes)} bytes: {raw_bytes.hex()}")
                             
+                            # Also process consist commands that may be in this data
+                            self.bridge._process_consist_commands(raw_bytes)
+                            
                             for b in raw_bytes:
                                 if b == PDI_SOP:
                                     in_packet = True
@@ -1091,71 +1072,24 @@ class PdiClient:
                 return None
     
     def query_train_data(self, train_id: int, timeout: float = 3.0) -> dict:
-        """Query Base 3 for train data - tries SER2 first, then WiFi TCP
+        """Query Base 3 for train data via SER2 only
+        
+        Note: Consist detection now primarily uses TRAIN_ADDRESS and TRAIN_UNIT
+        commands parsed directly from SER2 TMCC traffic. This PDI query is a
+        fallback for cases where those commands are missed.
         
         Returns dict with:
         - consist_flags: byte at offset 0x6F
         - consist_components: list of ConsistComponent from offset 0x70
         """
-        # Try SER2 first (no network config needed)
+        # Use SER2 only - no WiFi dependency
         result = self.query_train_data_ser2(train_id, timeout)
         if result:
             return result
         
-        # Fall back to WiFi TCP if SER2 didn't work
-        logger.info("📡 PDI: SER2 query failed, trying WiFi TCP...")
-        
-        # Reset discovery flag to allow retry with subnet scan
-        if not self.base3_ip:
-            self.discovery_attempted = False
-        
-        with self.pdi_lock:
-            # Connect if not already connected
-            if not self.connected:
-                if not self.connect():
-                    return None
-            
-            try:
-                # Build request
-                request = self.build_train_read_request(train_id)
-                
-                # Base 3 WiFi uses ASCII hex encoding (like PyTrain)
-                ascii_request = request.hex().upper()
-                logger.info(f"📡 PDI WiFi: Querying train {train_id}: {ascii_request}")
-                
-                # Send request
-                self.pdi_socket.sendall(ascii_request.encode())
-                
-                # Wait for response (ASCII hex encoded)
-                self.pdi_socket.settimeout(timeout)
-                response_hex = self.pdi_socket.recv(1024).decode(errors='ignore')
-                
-                if not response_hex:
-                    logger.warning(f"⚠️ PDI WiFi: No response for train {train_id}")
-                    return None
-                
-                logger.info(f"📡 PDI WiFi: Raw response: {response_hex[:100]}...")
-                
-                # Decode ASCII hex to bytes
-                try:
-                    response_bytes = bytes.fromhex(response_hex)
-                except ValueError as e:
-                    logger.warning(f"⚠️ PDI WiFi: Invalid hex response: {e}")
-                    return None
-                
-                # Response may contain multiple PDI packets - find the BASE_TRAIN response
-                # Look for D1 21 3C (SOP + BASE_TRAIN + train_id) followed by action 0x02 (read response)
-                train_packet = self._extract_train_packet(response_bytes, train_id)
-                if train_packet:
-                    return self._parse_train_response(train_packet)
-                else:
-                    logger.warning(f"⚠️ PDI WiFi: No train data packet found in response")
-                    return None
-                    
-            except Exception as e:
-                logger.error(f"❌ PDI WiFi query error: {e}")
-                self.disconnect()
-                return None
+        # SER2 query failed - consist detection will rely on TRAIN_ADDRESS/TRAIN_UNIT commands
+        # parsed directly from the TMCC traffic on SER2
+        return None
     
     def _extract_train_packet(self, data: bytes, train_id: int) -> bytes:
         """Extract the BASE_TRAIN response packet from concatenated PDI packets
@@ -1263,6 +1197,8 @@ class LionelMTHBridge:
         self.auto_engine_mapping = mth_settings.get('auto_engine_mapping', True)
         self.discovered_mth_engines = {}  # {lionel_addr: mth_engine}
         self.available_mth_engines = []  # List of available MTH engine numbers
+        self.engine_names = {}  # {mth_engine: name} - engine names from WTIU
+        self._load_engine_mappings()  # Load persisted mappings
         
         self.mth_devices = ['192.168.0.100', '192.168.0.102']
         self.lionel_serial = None
@@ -1762,6 +1698,11 @@ class LionelMTHBridge:
             
             dcs_speed = self.legacy_speed_manager.set_legacy_speed(engine, legacy_speed)
             
+            # Sync TMCC1 tracker (0-31) for Cab 1L dial consistency
+            if not hasattr(self, '_engine_tmcc_speed'):
+                self._engine_tmcc_speed = {}
+            self._engine_tmcc_speed[engine] = int(legacy_speed * 31 / 199)
+            
             if dcs_speed is not None:
                 return {
                     'type': 'speed',
@@ -2075,6 +2016,28 @@ class LionelMTHBridge:
                 value = command.get('value')
                 engine = command.get('engine', self.current_lionel_engine)
                 
+                # Check if this is a TR ID (lashup) - forward to lashup instead
+                mth_lashup_id = self.lashup_manager.get_mth_id_for_tr(engine)
+                if mth_lashup_id:
+                    # This is a lashup - send smoke command to lashup
+                    if value == 'off':
+                        logger.info(f"💨 TR{engine} smoke OFF -> MTH lashup {mth_lashup_id}")
+                        return self.send_lashup_command(mth_lashup_id, "abE", engine)
+                    elif value == 'low':
+                        logger.info(f"💨 TR{engine} smoke LOW -> MTH lashup {mth_lashup_id}")
+                        self.send_lashup_command(mth_lashup_id, "abF", engine)  # Turn on first
+                        return self.send_lashup_command(mth_lashup_id, "ab12", engine)
+                    elif value == 'med':
+                        logger.info(f"💨 TR{engine} smoke MED -> MTH lashup {mth_lashup_id}")
+                        self.send_lashup_command(mth_lashup_id, "abF", engine)  # Turn on first
+                        return self.send_lashup_command(mth_lashup_id, "ab11", engine)
+                    elif value == 'high':
+                        logger.info(f"💨 TR{engine} smoke HIGH -> MTH lashup {mth_lashup_id}")
+                        self.send_lashup_command(mth_lashup_id, "abF", engine)  # Turn on first
+                        return self.send_lashup_command(mth_lashup_id, "ab10", engine)
+                    return True
+                
+                # Single engine smoke control
                 if value == 'off':
                     self.smoke_states[engine] = 0
                     logger.info(f"💨 Smoke OFF (direct) for engine {engine}")
@@ -2151,17 +2114,26 @@ class LionelMTHBridge:
                     return self.send_wtiu_command('u5')  # Shutdown
                 return True
             
-            # Legacy aux2 commands
+            # Legacy aux2 commands - option1 (0x0D) is Cab 1L AUX2 = Headlight Toggle
             elif command.get('type') == 'aux2':
                 value = command.get('value')
+                engine = command.get('engine', self.current_lionel_engine)
                 if value == 'on':
-                    return self.send_wtiu_command('ab7')
+                    return self.send_wtiu_command('ab1')  # Headlight ON
                 elif value == 'off':
-                    return self.send_wtiu_command('ab6')
+                    return self.send_wtiu_command('ab0')  # Headlight OFF
                 elif value == 'option1':
-                    return self.send_wtiu_command('n2')
+                    # Cab 1L AUX2 button = Headlight Toggle - track state
+                    if not hasattr(self, '_engine_headlight_state'):
+                        self._engine_headlight_state = {}
+                    current_state = self._engine_headlight_state.get(engine, True)  # Default ON
+                    new_state = not current_state
+                    self._engine_headlight_state[engine] = new_state
+                    mth_cmd = "ab1" if new_state else "ab0"
+                    logger.info(f"💡 Engine {engine} headlight {'ON' if new_state else 'OFF'}: {mth_cmd}")
+                    return self.send_wtiu_command(mth_cmd)
                 elif value == 'option2':
-                    return self.send_wtiu_command('abD')
+                    return self.send_wtiu_command('abD')  # Beacon
                 return True
             
             # Legacy let-off sound
@@ -2234,16 +2206,20 @@ class LionelMTHBridge:
                     return self.send_wtiu_command(f'i{num}')
                 return True
             
-            # Legacy relative speed
+            # Legacy relative speed - use TMCC1 32-step scale for Cab 1L dial
             elif command.get('type') == 'speed' and command.get('relative'):
                 change = command.get('value', 0)
                 engine = command.get('engine', self.current_lionel_engine)
-                current = self.legacy_speed_manager.get_current_speed(engine)['legacy']
-                new_legacy = max(0, min(199, current + (change * 4)))
-                dcs_speed = self.legacy_speed_manager.set_legacy_speed(engine, new_legacy)
-                if dcs_speed is not None:
-                    return self.send_wtiu_command(f's{dcs_speed}')
-                return True
+                # Track in TMCC1 steps (0-31) for Cab 1L dial behavior
+                if not hasattr(self, '_engine_tmcc_speed'):
+                    self._engine_tmcc_speed = {}
+                current_tmcc = self._engine_tmcc_speed.get(engine, 0)
+                new_tmcc = max(0, min(31, current_tmcc + change))
+                self._engine_tmcc_speed[engine] = new_tmcc
+                # Convert TMCC1 (0-31) to MTH (0-120): each step = ~3.87 sMPH
+                dcs_speed = int(new_tmcc * 120 / 31)
+                logger.info(f"🎚️ Engine {engine} dial: TMCC {current_tmcc}+{change}={new_tmcc} -> MTH {dcs_speed}")
+                return self.send_wtiu_command(f's{dcs_speed}')
             
             # Legacy absolute 32-step speed
             elif command.get('type') == 'speed' and command.get('absolute') and command.get('scale') == '32_step':
@@ -2449,14 +2425,14 @@ class LionelMTHBridge:
         try:
             # Send H5
             self.mth_socket.send(b"H5\r\n")
-            h5_response = self.mth_socket.recv(256).decode()
+            h5_response = self.mth_socket.recv(256).decode('latin-1')
             logger.info(f"H5 response: {h5_response.strip()}")
             
             # Extract challenge
             if "H5" in h5_response:
                 # Try sending H6 with empty or simple response first
                 self.mth_socket.send(b"H600000000\r\n")
-                h6_response = self.mth_socket.recv(256).decode()
+                h6_response = self.mth_socket.recv(256).decode('latin-1')
                 logger.info(f"H6 response: {h6_response.strip()}")
                 
                 # If that doesn't work, try Mark's exact approach
@@ -2488,7 +2464,7 @@ class LionelMTHBridge:
             except (socket.error, ConnectionError) as e:
                 logger.warning(f"Attempt {attempt + 1} failed: {e}")
                 self.mth_connected = False
-                time.sleep(1 * (attempt + 1))  # Exponential backoff
+                time.sleep(0.5 * (2 ** attempt))  # Exponential backoff: 0.5s, 1s, 2s
                 
                 if attempt < max_retries - 1:
                     continue
@@ -2513,15 +2489,34 @@ class LionelMTHBridge:
         try:
             logger.info("🔍 Discovering MTH engines via I0 command...")
             
-            # Clear previous discoveries
-            self.available_mth_engines = []
-            self.discovered_mth_engines = {}
-            self.engine_capabilities = {}
+            # Don't clear discovered_mth_engines until we have new data
+            # This prevents race conditions with PDI queries
+            new_available_engines = []
+            new_discovered_mappings = {}
             
-            # Send I0 command to get engine roster (100-bit bitmap)
-            self.mth_socket.settimeout(3.0)
-            self.mth_socket.send(b"I0\r\n")
-            response = self.mth_socket.recv(512).decode()
+            # CRITICAL: Flush socket buffer before I0 to avoid contaminated responses
+            # Logs showed I0 getting leftover lashup command responses like "|u5,068Bÿ okay"
+            with self.mth_lock:
+                self.mth_socket.setblocking(False)
+                try:
+                    while True:
+                        stale = self.mth_socket.recv(512)
+                        if not stale:
+                            break
+                        logger.debug(f"📥 Flushed stale data before I0: {stale[:50]}")
+                except (socket.error, BlockingIOError):
+                    pass  # No more data to flush
+                self.mth_socket.setblocking(True)
+                
+                # Send I0 command to get engine roster (100-bit bitmap)
+                # IMPORTANT: I0 is expensive - Mark's code uses I_WAIT=10500ms (10.5 seconds)
+                # because the WTIU must poll all 100 possible engines over DCS track signal
+                self.mth_socket.settimeout(12.0)  # Match Mark's I_WAIT plus buffer
+                self.mth_socket.send(b"I0\r\n")
+                
+                # Wait a moment for WTIU to process, then read response
+                time.sleep(0.1)
+                response = self.mth_socket.recv(512).decode('latin-1')
             logger.info(f"🔍 I0 response: {response.strip()[:100]}...")
             
             # Parse I0 response - WTIU returns hex bytes representing engine bitmap
@@ -2551,7 +2546,7 @@ class LionelMTHBridge:
                                         reverse_byte_idx = num_bytes - 1 - byte_idx
                                         engine_num = reverse_byte_idx * 8 + bit + 1
                                         if 1 <= engine_num <= 99:
-                                            self.available_mth_engines.append(engine_num)
+                                            new_available_engines.append(engine_num)
                                             logger.info(f"🚂 Found engine {engine_num} (byte {byte_idx}, bit {bit}, reverse_idx {reverse_byte_idx})")
                             except ValueError:
                                 continue
@@ -2560,12 +2555,43 @@ class LionelMTHBridge:
             
             self.mth_socket.settimeout(5.0)
             
-            if self.available_mth_engines:
-                logger.info(f"✅ Found {len(self.available_mth_engines)} MTH engines: {self.available_mth_engines}")
+            if new_available_engines:
+                logger.info(f"✅ Found {len(new_available_engines)} MTH engines: {new_available_engines}")
                 
-                # Query capabilities for each engine
+                # Merge new engines with existing - update mapping if engine changed
+                for mth_engine in new_available_engines:
+                    lionel_addr = mth_engine - 1
+                    if lionel_addr > 0:
+                        # Skip if manually configured
+                        if str(lionel_addr) in self.engine_mappings:
+                            logger.debug(f"🔗 Lionel #{lionel_addr} has manual mapping, skipping")
+                            continue
+                        
+                        # Check if already mapped to same engine
+                        existing = self.discovered_mth_engines.get(str(lionel_addr))
+                        if existing == mth_engine:
+                            logger.debug(f"🔗 Lionel #{lionel_addr} already mapped to MTH #{mth_engine}")
+                        elif existing is not None:
+                            # Different engine at same address - overwrite
+                            old_name = self.engine_names.get(str(existing), "Unknown")
+                            self.discovered_mth_engines[str(lionel_addr)] = mth_engine
+                            logger.info(f"🔗 Updated Lionel #{lionel_addr}: MTH #{existing} ({old_name}) → MTH #{mth_engine}")
+                        else:
+                            # New mapping
+                            self.discovered_mth_engines[str(lionel_addr)] = mth_engine
+                            logger.info(f"🔗 Auto-mapped Lionel #{lionel_addr} → MTH #{mth_engine}")
+                
+                # Merge available engines list (don't replace, add new ones)
+                for eng in new_available_engines:
+                    if eng not in self.available_mth_engines:
+                        self.available_mth_engines.append(eng)
+                
+                # Query capabilities for each engine (also gets engine names)
                 for dcs_engine in self.available_mth_engines:
                     self.query_engine_capabilities(dcs_engine)
+                
+                # Save mappings to disk
+                self._save_engine_mappings()
                 
                 return True
             else:
@@ -2574,13 +2600,30 @@ class LionelMTHBridge:
                     try:
                         self.mth_socket.settimeout(1.0)
                         self.mth_socket.send(f"y{mth_engine}\r\n".encode())
-                        resp = self.mth_socket.recv(256).decode()
+                        resp = self.mth_socket.recv(256).decode('latin-1')
                         if "okay" in resp.lower():
-                            self.available_mth_engines.append(mth_engine)
+                            lionel_addr = mth_engine - 1
+                            # Merge with existing - add to available list
+                            if mth_engine not in self.available_mth_engines:
+                                self.available_mth_engines.append(mth_engine)
+                            # Update mapping if not manually configured
+                            if lionel_addr > 0 and str(lionel_addr) not in self.engine_mappings:
+                                existing = self.discovered_mth_engines.get(str(lionel_addr))
+                                if existing != mth_engine:
+                                    self.discovered_mth_engines[str(lionel_addr)] = mth_engine
+                                    if existing:
+                                        logger.info(f"🔗 Updated Lionel #{lionel_addr}: MTH #{existing} → MTH #{mth_engine}")
+                                    else:
+                                        logger.info(f"🔗 Auto-mapped Lionel #{lionel_addr} → MTH #{mth_engine}")
                             logger.info(f"🚂 Found engine {mth_engine} via fallback")
                     except:
                         continue
                 self.mth_socket.settimeout(5.0)
+                
+                # Save mappings after fallback discovery
+                if self.discovered_mth_engines:
+                    self._save_engine_mappings()
+                
                 return len(self.available_mth_engines) > 0
                 
         except Exception as e:
@@ -2598,7 +2641,7 @@ class LionelMTHBridge:
             # Query engine info - need full response for capability bytes
             cmd = f"I{dcs_engine}\r\n"
             self.mth_socket.send(cmd.encode())
-            response = self.mth_socket.recv(4096).decode()
+            response = self.mth_socket.recv(4096).decode('latin-1')
             logger.info(f"🔍 I{dcs_engine} response ({len(response)} bytes): {response.strip()[:200]}...")
             
             # Parse response: Ixx:YY;EngineName;HH,HH,...;01 okay
@@ -2659,6 +2702,9 @@ class LionelMTHBridge:
                         'protowhistle': has_protowhistle
                     }
                     
+                    # Store engine name for display
+                    self.engine_names[str(dcs_engine)] = engine_name
+                    
                     self.protowhistle_capable[lionel_engine] = has_protowhistle
                     
                     logger.info(f"🚂 Engine {dcs_engine} ({engine_name}): type=0x{engine_type:02X}, steam={is_steam}, diesel={is_diesel}, ProtoWhistle={has_protowhistle}")
@@ -2667,6 +2713,38 @@ class LionelMTHBridge:
             
         except Exception as e:
             logger.debug(f"⚠️ Failed to query capabilities for engine {dcs_engine}: {e}")
+    
+    ENGINE_MAPPINGS_FILE = "engine_mappings.json"
+    
+    def _load_engine_mappings(self):
+        """Load persisted engine mappings from file"""
+        try:
+            if os.path.exists(self.ENGINE_MAPPINGS_FILE):
+                with open(self.ENGINE_MAPPINGS_FILE, 'r') as f:
+                    data = json.load(f)
+                    self.discovered_mth_engines = data.get('discovered_mth_engines', {})
+                    self.available_mth_engines = data.get('available_mth_engines', [])
+                    self.engine_names = data.get('engine_names', {})
+                    logger.info(f"🔗 Loaded {len(self.discovered_mth_engines)} engine mappings from disk")
+                    for lionel, mth in self.discovered_mth_engines.items():
+                        name = self.engine_names.get(str(mth), "Unknown")
+                        logger.info(f"   Lionel #{lionel} → MTH #{mth} ({name})")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not load engine mappings: {e}")
+    
+    def _save_engine_mappings(self):
+        """Save engine mappings to persistent storage"""
+        try:
+            data = {
+                'discovered_mth_engines': self.discovered_mth_engines,
+                'available_mth_engines': self.available_mth_engines,
+                'engine_names': self.engine_names
+            }
+            with open(self.ENGINE_MAPPINGS_FILE, 'w') as f:
+                json.dump(data, f, indent=2)
+            logger.info(f"💾 Saved {len(self.discovered_mth_engines)} engine mappings to disk")
+        except Exception as e:
+            logger.error(f"❌ Could not save engine mappings: {e}")
     
     def get_mth_engine(self, lionel_address):
         """Get MTH engine number for Lionel address
@@ -2677,6 +2755,10 @@ class LionelMTHBridge:
         # First check manual mappings (override)
         if str(lionel_address) in self.engine_mappings:
             return self.engine_mappings[str(lionel_address)]
+        
+        # Then check discovered mappings
+        if str(lionel_address) in self.discovered_mth_engines:
+            return self.discovered_mth_engines[str(lionel_address)]
         
         # Default: DCS engine = Lionel engine + 1
         return lionel_address + 1
@@ -2702,6 +2784,27 @@ class LionelMTHBridge:
                     logger.debug(f"🔗 Auto-mapped Lionel #{lionel_addr} → MTH #{mth_engine}")
                 
                 mth_index += 1
+    
+    def _create_auto_mapping(self):
+        """Create automatic mapping from Lionel addresses to MTH engines
+        
+        MTH DCS engine numbers are Lionel TMCC address + 1
+        e.g., Lionel address 5 = MTH engine 6, Lionel address 10 = MTH engine 11
+        """
+        if not self.available_mth_engines:
+            return
+        
+        logger.info("🔧 Creating automatic engine mapping...")
+        
+        # Map each discovered MTH engine to its corresponding Lionel address
+        # MTH engine number = Lionel address + 1
+        for mth_engine in self.available_mth_engines:
+            lionel_addr = mth_engine - 1  # MTH 6 = Lionel 5, MTH 11 = Lionel 10
+            
+            # Only map if not already manually configured
+            if str(lionel_addr) not in self.engine_mappings:
+                self.discovered_mth_engines[str(lionel_addr)] = mth_engine
+                logger.info(f"🔗 Auto-mapped Lionel #{lionel_addr} → MTH #{mth_engine}")
     
     def discover_wtiu_mdns(self):
         """Discover MTH WTIU using mDNS/Zeroconf"""
@@ -2850,7 +2953,7 @@ class LionelMTHBridge:
                     h5_command = b"H5\r\n"
                     self.mth_socket.send(h5_command)  # Exact ESP8266 match
                     logger.info(f"🔐 Sent H5: {h5_command.strip()}")
-                    h5_response = self.mth_socket.recv(256).decode()
+                    h5_response = self.mth_socket.recv(256).decode('latin-1')
                     logger.info(f"🔍 WTIU H5 response: {h5_response.strip()}")
 
                     # Check if H5 response contains "okay"
@@ -2950,7 +3053,7 @@ class LionelMTHBridge:
                             logger.info(f"🔐 Sending H6 (ESP8266 format): {h6_command.strip()}")
                             logger.info(f"🔐 H6 command length: {len(h6_command.strip())} chars")
                             self.mth_socket.send(h6_command.encode())  # Exact ESP8266 match
-                            h6_response = self.mth_socket.recv(256).decode()
+                            h6_response = self.mth_socket.recv(256).decode('latin-1')
                             logger.info(f"🔍 WTIU H6 response: {h6_response.strip()}")
                     else:
                         logger.warning("⚠️ Failed to encrypt H6 key properly")
@@ -2969,12 +3072,12 @@ class LionelMTHBridge:
 
                         # Send x command to get TIU number
                         self.mth_socket.send(b"x\r\n")
-                        x_response = self.mth_socket.recv(256).decode()
+                        x_response = self.mth_socket.recv(256).decode('latin-1')
                         logger.info(f"🔍 WTIU x response: {x_response.strip()}")
 
                         # Send ! command to get version info
                         self.mth_socket.send(b"!\r\n")
-                        exclamation_response = self.mth_socket.recv(256).decode()
+                        exclamation_response = self.mth_socket.recv(256).decode('latin-1')
                         logger.info(f"🔍 WTIU ! response: {exclamation_response.strip()}")
 
                         # Accept any response from x and ! commands (WTIU is responding)
@@ -2986,14 +3089,14 @@ class LionelMTHBridge:
                         logger.info("🔐 Establishing PC connection with 'y' command...")
                         y_command = f"y11\r\n"  # Engine number 11 (Lionel Engine #10)
                         self.mth_socket.send(y_command.encode())
-                        y_response = self.mth_socket.recv(256).decode()
+                        y_response = self.mth_socket.recv(256).decode('latin-1')
                         logger.info(f"🔍 WTIU y response: {y_response.strip()}")
 
                         # Test if connection is working
                         logger.info("🔐 Testing connection with simple command...")
                         test_command = "y11\r\n"
                         self.mth_socket.send(test_command.encode())
-                        test_response = self.mth_socket.recv(256).decode()
+                        test_response = self.mth_socket.recv(256).decode('latin-1')
                         logger.info(f"🔍 Test response: {test_response.strip()}")
 
                         if "PC connection not available" not in test_response:
@@ -3032,7 +3135,7 @@ class LionelMTHBridge:
             
             # 1. Get TIU info
             self.mth_socket.send(b"x\r\n")
-            x_response = self.mth_socket.recv(256).decode()
+            x_response = self.mth_socket.recv(256).decode('latin-1')
             logger.info(f"🔍 x command response: {x_response.strip()}")
             
             # Parse TIU number
@@ -3043,7 +3146,7 @@ class LionelMTHBridge:
             
             # 2. Get version
             self.mth_socket.send(b"!\r\n")
-            version_response = self.mth_socket.recv(256).decode()
+            version_response = self.mth_socket.recv(256).decode('latin-1')
             logger.info(f"🔍 ! command response: {version_response.strip()}")
             
             # 3. Send y command with engine number (like ESP8266 Sendy)
@@ -3051,7 +3154,7 @@ class LionelMTHBridge:
             # Map Lionel Engine #11 to WTIU Engine #12 (DCS #13) 
             # Default to Engine #11 for Lionel Engine #10
             self.mth_socket.send(b"y12\r\n")
-            y_response = self.mth_socket.recv(256).decode()
+            y_response = self.mth_socket.recv(256).decode('latin-1')
             logger.info(f"🔍 y command response: {y_response.strip()}")
             
             logger.info("✅ WTIU setup complete - ready for commands!")
@@ -3083,7 +3186,7 @@ class LionelMTHBridge:
             # Wait for response with timeout
             self.mth_socket.settimeout(2.0)
             try:
-                response = self.mth_socket.recv(256).decode()
+                response = self.mth_socket.recv(256).decode('latin-1')
                 # Check for "->" prompt and extract response
                 if "->" in response:
                     response = response.split("->")[0].strip()
@@ -3104,47 +3207,131 @@ class LionelMTHBridge:
             logger.error(f"❌ Command send error: {e}")
             return False
     
-    def create_mth_lashup(self, mth_lashup_id: int, engine_list: str) -> bool:
-        """Create MTH lashup on WTIU
+    def create_mth_lashup(self, mth_lashup_id: int, engine_list: str, max_retries: int = 20) -> bool:
+        """Create MTH lashup on WTIU with retry logic
         
         Args:
-            mth_lashup_id: MTH lashup ID (101-120)
+            mth_lashup_id: MTH lashup ID (102-120)
             engine_list: ASCII hex string of DCS engine numbers (e.g., "0F8A")
+            max_retries: Maximum number of retry attempts (default 20, ~4 minutes total)
         
         Returns:
             True if lashup created successfully
+            
+        Note: I0 queries are expensive (~10.5 seconds each per Mark's I_WAIT constant)
+        because the WTIU must poll all 100 possible engines over DCS track signal.
+        We use 12 second intervals between attempts to avoid overwhelming the WTIU.
         """
         if not self.mth_connected or not self.mth_socket:
             logger.warning("⚠️ Cannot create MTH lashup: WTIU not connected")
             return False
         
+        # Pause periodic engine discovery during lashup creation to prevent I0 spam
+        self._lashup_creation_in_progress = True
+        
         try:
-            with self.mth_lock:
-                lashup_cmd = f"U{engine_list}"
-                logger.info(f"🔗 Creating MTH lashup {mth_lashup_id}: {lashup_cmd}")
-                
-                full_cmd = f"{lashup_cmd}\r\n".encode()
-                self.mth_socket.send(full_cmd)
-                
-                self.mth_socket.settimeout(3.0)
+            for attempt in range(max_retries):
                 try:
-                    response = self.mth_socket.recv(256).decode()
-                    logger.info(f"📥 Lashup creation response: {response.strip()}")
-                    
-                    if "okay" in response.lower() or response.strip():
-                        logger.info(f"✅ MTH lashup {mth_lashup_id} created successfully")
-                        return True
-                    else:
-                        logger.warning(f"⚠️ Unexpected lashup response: {response}")
-                        return False
+                    with self.mth_lock:
+                        # Flush any pending data in the socket buffer
+                        self.mth_socket.setblocking(False)
+                        try:
+                            while True:
+                                stale = self.mth_socket.recv(256)
+                                if not stale:
+                                    break
+                                logger.debug(f"📥 Flushed stale data: {stale}")
+                        except (socket.error, BlockingIOError):
+                            pass  # No more data to flush
+                        self.mth_socket.setblocking(True)
                         
-                except socket.timeout:
-                    logger.warning("⚠️ Lashup creation timeout (may still have succeeded)")
-                    return True
-                    
-        except Exception as e:
-            logger.error(f"❌ MTH lashup creation error: {e}")
+                        # NOTE: Removed I0 roster pre-check - Mark's code doesn't do this
+                        # The I0 roster is unreliable and was blocking lashup creation
+                        # Just send the U command directly like Mark's RTC does
+                        
+                        logger.info(f"🔗 Creating MTH lashup (attempt {attempt + 1}/{max_retries})")
+                        
+                        # Small delay after buffer flush before sending command
+                        time.sleep(0.2)
+                        
+                        # From Mark's Comm_Thread.cpp:
+                        # - For lashup commands (Consist >= LASHUPMIN):
+                        #   sCommand_String = sCommand_String + String((char *)ptrLashUpEngineList);
+                        #   if (FirstChar != 'U') sCommand_String = "|" + sCommand_String;
+                        # - U command uses LashUpEngineList + 1 (skips the comma)
+                        # - U command does NOT get the "|" prefix
+                        #
+                        # From Train_Control.cpp line 8356:
+                        # Send_String_FIFO(LUNo, "U", TIU, RemoteNo, 11, VERY_LONG_WAIT, RECORD_OK, LashUpEngineList + 1, &respCode);
+                        # "LashUp is always sent to the TIU as engine number 101 (DCS EngineNo #102 0x66)"
+                        
+                        # Skip the leading comma (0x2C) for U command
+                        # engine_list format: ",<hex><hex>...ÿ" -> we want "<hex><hex>...ÿ"
+                        engine_list_no_comma = engine_list[1:] if engine_list.startswith(chr(0x2C)) else engine_list
+                        
+                        # Build U command: "U" + engine_list_no_comma
+                        lashup_cmd = f"U{engine_list_no_comma}"
+                        
+                        # Use latin-1 encoding to preserve raw 0xFF byte
+                        full_cmd = f"{lashup_cmd}\r\n".encode('latin-1')
+                        logger.info(f"🔗 Sending U command: {' '.join(f'{b:02X}' for b in full_cmd)} ({len(full_cmd)} bytes)")
+                        self.mth_socket.send(full_cmd)
+                        
+                        # Lashup creation takes a long time - Mark's RTC uses VERY_LONG_WAIT (2 seconds)
+                        # Use longer timeout to give WTIU time to communicate with all engines
+                        self.mth_socket.settimeout(5.0)
+                        try:
+                            response = self.mth_socket.recv(256).decode('latin-1')
+                            logger.info(f"📥 Lashup creation response: {response.strip()}")
+                            
+                            if "okay" in response.lower():
+                                # After creating lashup, send 'y' command to select head engine
+                                # Mark's RTC: "apparently the WTIU requires a 'yX' command after the 'U' command"
+                                if len(engine_list) >= 2:
+                                    head_engine_dcs = int(engine_list[:2], 16) & 0x7F  # Remove reverse bit
+                                    select_head_cmd = f"y{head_engine_dcs}\r\n"
+                                    logger.info(f"🔗 Selecting head engine {head_engine_dcs} for lashup")
+                                    self.mth_socket.send(select_head_cmd.encode())
+                                    time.sleep(0.1)
+                                    try:
+                                        head_response = self.mth_socket.recv(256).decode('latin-1')
+                                        logger.info(f"📥 Head engine selection response: {head_response.strip()}")
+                                    except socket.timeout:
+                                        pass
+                                
+                                logger.info(f"✅ MTH lashup {mth_lashup_id} created successfully on attempt {attempt + 1}")
+                                return True
+                            elif "timeout" in response.lower() or "error" in response.lower():
+                                # DCS timeout or error - retry
+                                logger.warning(f"⚠️ Lashup creation failed (attempt {attempt + 1}/{max_retries}): {response.strip()}")
+                                if attempt < max_retries - 1:
+                                    # Wait before retry - give WTIU time to recover
+                                    time.sleep(1.0)
+                                    continue
+                            else:
+                                logger.warning(f"⚠️ Unexpected lashup response: {response}")
+                                return False
+                                
+                        except socket.timeout:
+                            logger.warning(f"⚠️ Lashup creation timeout (attempt {attempt + 1}/{max_retries})")
+                            if attempt < max_retries - 1:
+                                time.sleep(1.0)
+                                continue
+                            # On final attempt, assume success (some commands don't return response)
+                            return True
+                            
+                except Exception as e:
+                    logger.error(f"❌ MTH lashup creation error (attempt {attempt + 1}/{max_retries}): {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(1.0)
+                        continue
+                    return False
+            
+            logger.error(f"❌ MTH lashup {mth_lashup_id} creation failed after {max_retries} attempts")
             return False
+        finally:
+            # Re-enable periodic engine discovery
+            self._lashup_creation_in_progress = False
     
     def handle_lashup_command(self, command: dict) -> bool:
         """Handle lashup-related commands from Lionel
@@ -3161,14 +3348,23 @@ class LionelMTHBridge:
             logger.info(f"🔗 Lashup command detected: {cmd_value} for TR{train_id}")
             
             if cmd_value == 'clear' and train_id > 0:
-                # Clear command received for this train - clear the MTH lashup
+                # Clear command received - break up MTH lashup properly
                 if self.lashup_manager.get_mth_id_for_tr(train_id):
-                    self.lashup_manager.clear_lashup(train_id)
-                    logger.info(f"🗑️ Cleared MTH lashup for TR{train_id}")
-                else:
-                    logger.info(f"📡 TR{train_id} clear received but no MTH lashup exists")
-                # Remove from queried set so next command will trigger a new PDI query
+                    # Get engines before clearing, then send m4 to each to break up lashup
+                    mth_engines = self.lashup_manager.clear_lashup(train_id)
+                    logger.info(f"🗑️ Breaking up MTH lashup for TR{train_id}")
+                    
+                    # Send m4 (remove from lashup) to each engine individually
+                    # Per MTH docs: "To break up a LashUp, send the m4 command to each engine"
+                    for mth_id in mth_engines:
+                        lionel_id = mth_id - 1  # Convert MTH ID back to Lionel
+                        logger.info(f"🔗 Sending m4 (break lashup) to engine {lionel_id} (MTH {mth_id})")
+                        self.send_wtiu_command("m4", engine=lionel_id)
+                        time.sleep(0.1)  # Brief delay between commands
+                # Remove from queried set so we can query again after rebuild
                 self.queried_trains.discard(train_id)
+                # Cancel any pending query
+                self.pending_train_queries.discard(train_id)
                 return True
             
             if cmd_value == 'assign' and train_id > 0:
@@ -3197,23 +3393,29 @@ class LionelMTHBridge:
             return True
         
         if cmd_type == 'train_command':
-            # Train commands - query PDI once per TR ID to check for MTH engines
+            # Train commands - forward to MTH lashup if mapping exists
             train_id = command.get('train_id', 0)
+            cmd_code = command.get('command', 0)
+            
+            logger.debug(f"🔍 train_command: TR{train_id} cmd=0x{cmd_code:03x}")
+            
             if train_id > 0:
                 mth_id = self.lashup_manager.get_mth_id_for_tr(train_id)
+                logger.debug(f"🔍 TR{train_id} -> mth_id={mth_id}")
                 if mth_id:
-                    logger.info(f"🚂 Train command for TR{train_id} -> MTH lashup {mth_id}")
                     # Forward command to MTH lashup
+                    logger.info(f"🔗 Forwarding TR{train_id} cmd 0x{cmd_code:03x} to MTH lashup {mth_id}")
                     self.forward_train_command_to_mth(train_id, mth_id, command)
                 elif train_id not in self.queried_trains and train_id not in self.pending_train_queries:
-                    # First command to this TR ID - query PDI to check for MTH engines
-                    logger.info(f"🔗 New TR{train_id} detected - scheduling PDI query")
-                    self.pending_train_queries.add(train_id)
-                    threading.Thread(
-                        target=self._delayed_train_query,
-                        args=(train_id,),
-                        daemon=True
-                    ).start()
+                    # New TR ID - schedule PDI query (skip clear commands 0x12C)
+                    if cmd_code != 0x12C:
+                        logger.info(f"🔗 New TR{train_id} detected - scheduling PDI query in 3s")
+                        self.pending_train_queries.add(train_id)
+                        threading.Thread(
+                            target=self._delayed_train_query,
+                            args=(train_id, 3.0),
+                            daemon=True
+                        ).start()
             return True
         
         return False
@@ -3223,81 +3425,379 @@ class LionelMTHBridge:
         
         Args:
             train_id: Lionel TR ID
-            mth_id: MTH lashup ID (101-120)
+            mth_id: MTH lashup ID (102-120)
             command: Parsed command dict with 'command' field containing the raw command code
         """
         cmd_code = command.get('command', 0)
         
+        # Track absolute speed for each lashup (shared between Cab 1L and Cab 3)
+        if not hasattr(self, '_lashup_current_speed'):
+            self._lashup_current_speed = {}
+        
         # Map TMCC2 train commands to MTH lashup commands
-        # Speed commands: 0x000-0x0C7 (0-199)
+        # Speed commands: 0x000-0x0C7 (0-199) - Cab 3 sends these as absolute speed
         if cmd_code <= 0x0C7:
-            speed = cmd_code
+            legacy_speed = cmd_code
             # Convert Legacy 200-step to DCS 120-step
-            dcs_speed = int(speed * 120 / 199)
+            dcs_speed = int(legacy_speed * 120 / 199)
+            # Also sync TMCC1 tracker (0-31) for Cab 1L dial consistency
+            # TMCC1 = Legacy * 31 / 199
+            tmcc_speed = int(legacy_speed * 31 / 199)
+            if not hasattr(self, '_lashup_tmcc_speed'):
+                self._lashup_tmcc_speed = {}
+            self._lashup_tmcc_speed[train_id] = tmcc_speed
+            self._lashup_current_speed[train_id] = dcs_speed
             mth_cmd = f"s{dcs_speed}"
-            logger.info(f"🚂 TR{train_id} speed {speed} -> MTH lashup {mth_id} speed {dcs_speed}")
-            self.send_lashup_command(mth_id, mth_cmd)
+            logger.info(f"🚂 TR{train_id} speed {legacy_speed} (TMCC {tmcc_speed}) -> MTH lashup {mth_id} speed {dcs_speed}")
+            self.send_lashup_command(mth_id, mth_cmd, train_id)
             return
         
         # Direction commands
+        # MTH only accepts d0 (forward) or d1 (reverse), not toggle
+        # Track direction state and convert toggle to explicit direction
         if cmd_code == 0x100:  # Forward
             logger.info(f"🚂 TR{train_id} forward -> MTH lashup {mth_id}")
-            self.send_lashup_command(mth_id, "d0")
+            self.send_lashup_command(mth_id, "d0", train_id)
+            # Track direction state
+            if not hasattr(self, '_lashup_direction_states'):
+                self._lashup_direction_states = {}
+            self._lashup_direction_states[train_id] = 0  # 0 = forward
             return
-        if cmd_code == 0x101:  # Toggle direction
-            logger.info(f"🚂 TR{train_id} toggle direction -> MTH lashup {mth_id}")
-            self.send_lashup_command(mth_id, "d2")  # DCS toggle
+        if cmd_code == 0x101:  # Toggle direction (Cab 1L sends this)
+            # Track direction state and send explicit forward/reverse
+            # Add 500ms debounce to prevent rapid toggling
+            if not hasattr(self, '_lashup_direction_states'):
+                self._lashup_direction_states = {}
+            if not hasattr(self, '_lashup_direction_debounce'):
+                self._lashup_direction_debounce = {}
+            
+            import time
+            now = time.time()
+            dir_key = f"dir_{train_id}"
+            last_toggle = self._lashup_direction_debounce.get(dir_key, 0)
+            if now - last_toggle < 0.5:
+                logger.debug(f"🚂 TR{train_id} direction toggle ignored (debounce)")
+                return
+            self._lashup_direction_debounce[dir_key] = now
+            
+            current_dir = self._lashup_direction_states.get(train_id, 0)  # Default forward
+            new_dir = 1 - current_dir  # Toggle: 0->1, 1->0
+            self._lashup_direction_states[train_id] = new_dir
+            
+            if new_dir == 0:
+                logger.info(f"🚂 TR{train_id} toggle -> forward -> MTH lashup {mth_id}")
+                self.send_lashup_command(mth_id, "d0", train_id)
+            else:
+                logger.info(f"🚂 TR{train_id} toggle -> reverse -> MTH lashup {mth_id}")
+                self.send_lashup_command(mth_id, "d1", train_id)
             return
         if cmd_code == 0x103:  # Reverse
             logger.info(f"🚂 TR{train_id} reverse -> MTH lashup {mth_id}")
-            self.send_lashup_command(mth_id, "d1")
+            self.send_lashup_command(mth_id, "d1", train_id)
+            # Track direction state
+            if not hasattr(self, '_lashup_direction_states'):
+                self._lashup_direction_states = {}
+            self._lashup_direction_states[train_id] = 1  # 1 = reverse
             return
         
         # Boost/Brake
         if cmd_code == 0x104:  # Boost
             logger.info(f"🚂 TR{train_id} boost -> MTH lashup {mth_id}")
-            self.send_lashup_command(mth_id, "s+5")  # Relative speed increase
+            self.send_lashup_command(mth_id, "s+5", train_id)  # Relative speed increase
             return
         if cmd_code == 0x107:  # Brake
             logger.info(f"🚂 TR{train_id} brake -> MTH lashup {mth_id}")
-            self.send_lashup_command(mth_id, "s-5")  # Relative speed decrease
+            self.send_lashup_command(mth_id, "s-5", train_id)  # Relative speed decrease
             return
         
-        # Horn/Bell
-        if cmd_code == 0x11C:  # Horn 1
-            logger.info(f"🚂 TR{train_id} horn -> MTH lashup {mth_id}")
-            self.send_lashup_command(mth_id, "w2")
-            return
-        if cmd_code == 0x11D:  # Bell
-            logger.info(f"🚂 TR{train_id} bell -> MTH lashup {mth_id}")
-            self.send_lashup_command(mth_id, "w4")
+        # Relative speed commands (0x130-0x13F) - Cab 1L speed dial sends these
+        # From LCS Legacy Protocol Spec:
+        # D = 0x0 => -5 (max decrease)
+        # D = 0x1 => -4
+        # D = 0x2 => -3
+        # D = 0x3 => -2
+        # D = 0x4 => -1
+        # D = 0x5 => 0 (neutral, no change)
+        # D = 0x6 => +1
+        # D = 0x7 => +2
+        # D = 0x8 => +3
+        # D = 0x9 => +4
+        # D = 0xA => +5 (max increase)
+        if 0x130 <= cmd_code <= 0x13F:
+            rel_value = cmd_code & 0x0F  # 0-15
+            
+            # Throttle the commands - send every 100ms to match Cab 1L command rate
+            # Cab 1L sends speed dial commands approximately every 100ms when dial is turned
+            if not hasattr(self, '_lashup_speed_throttle'):
+                self._lashup_speed_throttle = {}
+            import time
+            now = time.time()
+            throttle_key = f"speed_{train_id}"
+            last_send = self._lashup_speed_throttle.get(throttle_key, 0)
+            if now - last_send < 0.1:
+                return  # Silently throttle
+            self._lashup_speed_throttle[throttle_key] = now
+            
+            # Track speed in TMCC1 units (0-31) for Cab 1L dial behavior
+            # Cab 1L is designed for TMCC1's 32-step system
+            # Convert TMCC1 steps to MTH: MTH = TMCC_step * 120 / 31
+            if not hasattr(self, '_lashup_tmcc_speed'):
+                self._lashup_tmcc_speed = {}
+            
+            current_tmcc_speed = self._lashup_tmcc_speed.get(train_id, 0)
+            
+            # Calculate speed delta: rel_value 5 = neutral, <5 = decrease, >5 = increase
+            # Delta ranges from -5 (rel_value=0) to +5 (rel_value=10)
+            speed_delta = rel_value - 5
+            
+            if speed_delta == 0:
+                return  # Neutral, no change
+            
+            # Apply delta to TMCC1 speed (0-31 range)
+            new_tmcc_speed = max(0, min(31, current_tmcc_speed + speed_delta))
+            
+            if new_tmcc_speed != current_tmcc_speed:
+                self._lashup_tmcc_speed[train_id] = new_tmcc_speed
+                
+                # Convert TMCC1 speed (0-31) to MTH DCS speed (0-120)
+                # Each TMCC step = ~3.87 MTH sMPH
+                new_mth_speed = int(new_tmcc_speed * 120 / 31)
+                self._lashup_current_speed[train_id] = new_mth_speed
+                
+                direction = "up" if speed_delta > 0 else "down"
+                logger.info(f"🎚️ TR{train_id} dial {direction}: TMCC {current_tmcc_speed}+{speed_delta}={new_tmcc_speed} -> MTH {new_mth_speed}")
+                self.send_lashup_command(mth_id, f"s{new_mth_speed}", train_id)
             return
         
-        # Startup/Shutdown
-        if cmd_code == 0x1FB:  # Startup seq 1
-            logger.info(f"🚂 TR{train_id} startup -> MTH lashup {mth_id}")
-            self.send_lashup_command(mth_id, "u4")
+        # Horn/Bell - from Mark's RTC: WHISTLE_ON="w2", WHISTLE_OFF="bFFFD", BELL_ON="w4", BELL_OFF="bFFFB"
+        # Cab 1L doesn't send horn OFF - it just stops sending horn ON
+        # We use a timeout to detect when whistle is released
+        if cmd_code == 0x11C:  # Horn ON
+            whistle_key = f"whistle_{train_id}"
+            if not hasattr(self, '_lashup_whistle_timers'):
+                self._lashup_whistle_timers = {}
+            
+            # Cancel any existing timer
+            if whistle_key in self._lashup_whistle_timers:
+                self._lashup_whistle_timers[whistle_key].cancel()
+            
+            # Check if whistle is already on - don't spam w2 commands
+            if not hasattr(self, '_lashup_whistle_states'):
+                self._lashup_whistle_states = {}
+            
+            if not self._lashup_whistle_states.get(whistle_key, False):
+                logger.info(f"🚂 TR{train_id} horn ON -> MTH lashup {mth_id}")
+                self.send_lashup_command(mth_id, "w2", train_id)
+                self._lashup_whistle_states[whistle_key] = True
+            
+            # Start timer to turn off whistle after 300ms of no horn commands
+            def whistle_off():
+                if self._lashup_whistle_states.get(whistle_key, False):
+                    logger.info(f"🚂 TR{train_id} horn OFF (timeout) -> MTH lashup {mth_id}")
+                    self.send_lashup_command(mth_id, "bFFFD", train_id)
+                    self._lashup_whistle_states[whistle_key] = False
+            
+            timer = threading.Timer(0.3, whistle_off)
+            timer.daemon = True
+            timer.start()
+            self._lashup_whistle_timers[whistle_key] = timer
             return
-        if cmd_code == 0x1FD:  # Shutdown seq 1
-            logger.info(f"🚂 TR{train_id} shutdown -> MTH lashup {mth_id}")
-            self.send_lashup_command(mth_id, "u5")
+        if cmd_code == 0x11F:  # Horn OFF (Legacy uses 0x11F for horn release)
+            logger.info(f"🚂 TR{train_id} horn OFF -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "bFFFD", train_id)  # Whistle off from Mark's RTC
+            # Clear whistle state
+            if hasattr(self, '_lashup_whistle_states'):
+                self._lashup_whistle_states[f"whistle_{train_id}"] = False
+            return
+        if cmd_code == 0x11D:  # Bell toggle - track state and send on/off with 1s debounce
+            bell_key = f"bell_{train_id}"
+            if not hasattr(self, '_lashup_bell_states'):
+                self._lashup_bell_states = {}
+            if not hasattr(self, '_lashup_bell_debounce'):
+                self._lashup_bell_debounce = {}
+            
+            # Check debounce - ignore if less than 2 seconds since last toggle
+            # Cab 1L sends rapid repeated 0x11D commands when bell button is pressed
+            import time
+            now = time.time()
+            last_toggle = self._lashup_bell_debounce.get(bell_key, 0)
+            if now - last_toggle < 2.0:
+                logger.debug(f"🚂 TR{train_id} bell toggle ignored (debounce)")
+                return
+            self._lashup_bell_debounce[bell_key] = now
+            
+            # Toggle bell state
+            current_state = self._lashup_bell_states.get(bell_key, False)
+            new_state = not current_state
+            self._lashup_bell_states[bell_key] = new_state
+            
+            if new_state:
+                logger.info(f"🚂 TR{train_id} bell ON -> MTH lashup {mth_id}")
+                self.send_lashup_command(mth_id, "w4", train_id)  # Bell ON
+            else:
+                logger.info(f"🚂 TR{train_id} bell OFF -> MTH lashup {mth_id}")
+                self.send_lashup_command(mth_id, "bFFFB", train_id)  # Bell OFF
             return
         
-        # Quilling horn (0x1E0-0x1EF)
+        # Keypad buttons (from Cab 1L testing)
+        # Volume control - MTH uses absolute volume: v<type><value> where type=0 (master), value=0-100
+        # Track volume state and adjust by 10% per button press
+        if not hasattr(self, '_lashup_volume'):
+            self._lashup_volume = {}
+        
+        # 0x111 = Button 1 (Volume Up)
+        if cmd_code == 0x111:
+            current_vol = self._lashup_volume.get(train_id, 50)  # Default 50%
+            new_vol = min(100, current_vol + 10)
+            self._lashup_volume[train_id] = new_vol
+            logger.info(f"🚂 TR{train_id} volume up -> MTH lashup {mth_id} vol {new_vol}%")
+            self.send_lashup_command(mth_id, f"v0{new_vol:03d}", train_id)  # Master volume
+            return
+        # 0x114 = Button 4 (Volume Down)
+        if cmd_code == 0x114:
+            current_vol = self._lashup_volume.get(train_id, 50)  # Default 50%
+            new_vol = max(0, current_vol - 10)
+            self._lashup_volume[train_id] = new_vol
+            logger.info(f"🚂 TR{train_id} volume down -> MTH lashup {mth_id} vol {new_vol}%")
+            self.send_lashup_command(mth_id, f"v0{new_vol:03d}", train_id)  # Master volume
+            return
+        # 0x115 = Button 5 (Quick Shutdown)
+        if cmd_code == 0x115:
+            logger.info(f"🚂 TR{train_id} quick shutdown (btn 5) -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "u5", train_id)
+            return
+        # 0x109 = AUX1 (Quick Startup)
+        if cmd_code == 0x109:
+            logger.info(f"🚂 TR{train_id} quick startup (AUX1) -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "u4", train_id)
+            return
+        # 0x105 = Rear Coupler (Lionel) -> c0 (MTH front coupler fires rear on consist)
+        if cmd_code == 0x105:
+            logger.info(f"🚂 TR{train_id} rear coupler -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "c0", train_id)  # Swapped: c0 fires rear on consist
+            return
+        # 0x106 = Front Coupler (Lionel) -> c1 (MTH rear coupler fires front on consist)
+        if cmd_code == 0x106:
+            logger.info(f"🚂 TR{train_id} front coupler -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "c1", train_id)  # Swapped: c1 fires front on consist
+            return
+        # 0x10D = AUX2 (Headlight Toggle) - MTH uses ab1 (ON) / ab0 (OFF)
+        if cmd_code == 0x10D:
+            # Debounce: 500ms cooldown to prevent rapid toggling
+            current_time = time.time()
+            if not hasattr(self, '_lashup_headlight_debounce'):
+                self._lashup_headlight_debounce = {}
+            last_time = self._lashup_headlight_debounce.get(train_id, 0)
+            if current_time - last_time < 0.5:  # 500ms debounce
+                return  # Ignore repeated command
+            self._lashup_headlight_debounce[train_id] = current_time
+            
+            # Track headlight state per lashup
+            if not hasattr(self, '_lashup_headlight_state'):
+                self._lashup_headlight_state = {}
+            current_state = self._lashup_headlight_state.get(train_id, True)  # Default ON
+            new_state = not current_state
+            self._lashup_headlight_state[train_id] = new_state
+            mth_cmd = "ab1" if new_state else "ab0"
+            logger.info(f"🚂 TR{train_id} headlight {'ON' if new_state else 'OFF'} (AUX2) -> MTH lashup {mth_id}: {mth_cmd}")
+            self.send_lashup_command(mth_id, mth_cmd, train_id)
+            return
+        # 0x110 = Button 0 (Engine Reset)
+        if cmd_code == 0x110:
+            logger.info(f"🚂 TR{train_id} engine reset (btn 0) -> MTH lashup {mth_id}")
+            # No direct MTH equivalent for engine reset in lashup mode
+            return
+        # 0x118 = Button 8 (Smoke Down)
+        if cmd_code == 0x118:
+            logger.info(f"🚂 TR{train_id} smoke down (btn 8) -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "abE", train_id)  # Smoke down/off
+            return
+        # 0x119 = Button 9 (Smoke Up)
+        if cmd_code == 0x119:
+            logger.info(f"🚂 TR{train_id} smoke up (btn 9) -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "abF", train_id)  # Smoke up/on
+            return
+        
+        # Volume control (0x1B0-0x1BF) - master volume (from speed dial)
+        if 0x1B0 <= cmd_code <= 0x1BF:
+            vol_level = cmd_code & 0x0F
+            # DCS volume is 0-8, Legacy is 0-15, so scale
+            dcs_vol = min(8, vol_level // 2)
+            logger.info(f"🚂 TR{train_id} volume {vol_level} -> MTH lashup {mth_id} vol {dcs_vol}")
+            self.send_lashup_command(mth_id, f"v{dcs_vol:02d}00", train_id)  # Master volume
+            return
+        
+        # Startup/Shutdown sequences (from menu/extended)
+        if cmd_code == 0x1FB:  # Startup seq 1 (extended startup from menu)
+            logger.info(f"🚂 TR{train_id} startup seq 1 -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "u4", train_id)
+            return
+        if cmd_code == 0x1FC:  # Startup seq 2 (extended startup)
+            logger.info(f"🚂 TR{train_id} extended startup -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "u6", train_id)
+            return
+        if cmd_code == 0x1FD:  # Shutdown seq 1 (from menu)
+            logger.info(f"🚂 TR{train_id} shutdown seq 1 -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "u5", train_id)
+            return
+        if cmd_code == 0x1FE:  # Shutdown seq 2 (extended shutdown)
+            logger.info(f"🚂 TR{train_id} extended shutdown -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "u7", train_id)
+            return
+        
+        # Quilling horn (0x1E0-0x1EF) - Map to regular horn for lashups
+        # 0x1E0 = off, 0x1E1-0x1EF = varying intensity
+        # Cab 3 uses quilling horn for whistle, so we need to support it
         if 0x1E0 <= cmd_code <= 0x1EF:
-            quill_level = cmd_code & 0x0F
-            logger.info(f"🚂 TR{train_id} quilling horn {quill_level} -> MTH lashup {mth_id}")
-            self.send_lashup_command(mth_id, "w2")  # Just trigger horn for now
+            whistle_key = f"whistle_{train_id}"
+            if not hasattr(self, '_lashup_whistle_timers'):
+                self._lashup_whistle_timers = {}
+            if not hasattr(self, '_lashup_whistle_states'):
+                self._lashup_whistle_states = {}
+            
+            # Cancel any existing timer
+            if whistle_key in self._lashup_whistle_timers:
+                self._lashup_whistle_timers[whistle_key].cancel()
+            
+            if cmd_code == 0x1E0:
+                # Quilling horn off - turn off whistle
+                if self._lashup_whistle_states.get(whistle_key, False):
+                    logger.info(f"🚂 TR{train_id} horn OFF -> MTH lashup {mth_id}")
+                    self.send_lashup_command(mth_id, "bFFFD", train_id)
+                    self._lashup_whistle_states[whistle_key] = False
+            else:
+                # Quilling horn on (any level) - send simple w2 (MTH doesn't support quilling in lashup)
+                if not self._lashup_whistle_states.get(whistle_key, False):
+                    logger.info(f"🚂 TR{train_id} horn ON -> MTH lashup {mth_id}")
+                    self.send_lashup_command(mth_id, "w2", train_id)
+                    self._lashup_whistle_states[whistle_key] = True
+                
+                # Start timer to turn off whistle after 300ms of no horn commands
+                def whistle_off():
+                    if self._lashup_whistle_states.get(whistle_key, False):
+                        logger.info(f"🚂 TR{train_id} horn OFF (timeout) -> MTH lashup {mth_id}")
+                        self.send_lashup_command(mth_id, "bFFFD", train_id)
+                        self._lashup_whistle_states[whistle_key] = False
+                
+                timer = threading.Timer(0.3, whistle_off)
+                timer.daemon = True
+                timer.start()
+                self._lashup_whistle_timers[whistle_key] = timer
             return
         
         logger.debug(f"🚂 TR{train_id} unhandled command 0x{cmd_code:03x}")
     
-    def send_lashup_command(self, mth_id: int, mth_cmd: str):
+    def send_lashup_command(self, mth_id: int, mth_cmd: str, train_id: int = None):
         """Send a command to an MTH lashup
         
         Args:
-            mth_id: MTH lashup ID (101-120)
+            mth_id: MTH lashup ID (102-120) - for tracking only
             mth_cmd: MTH command string (e.g., "s60", "d0", "w2")
+            train_id: Lionel TR ID (to get engine list)
+            
+        Note: All lashups use DCS engine 102 (0x66) regardless of lashup ID.
+        Commands to lashups need '|' prefix and engine list appended.
+        Format: |<command>,<engine_list>  (e.g., |s60,0B86)
         """
         if not self.mth_connected or not self.mth_socket:
             logger.warning("⚠️ Cannot send lashup command: WTIU not connected")
@@ -3305,24 +3805,36 @@ class LionelMTHBridge:
         
         try:
             with self.mth_lock:
-                # Select the lashup first
-                # MTH lashup IDs 101-120 map to DCS engine numbers
-                select_cmd = f"y{mth_id}\r\n"
+                # All lashups use DCS engine 102 (0x66) - from Mark's RTC code
+                select_cmd = f"y{MTH_LASHUP_DCS_NO}\r\n"  # Always 102
                 self.mth_socket.send(select_cmd.encode())
                 time.sleep(0.05)
                 
-                # Send the command
-                full_cmd = f"{mth_cmd}\r\n"
-                self.mth_socket.send(full_cmd.encode())
-                logger.info(f"🚂 Sent to MTH lashup {mth_id}: {mth_cmd}")
+                # Get engine list for this lashup (already includes comma prefix)
+                engine_list = ""
+                if train_id:
+                    engine_list = self.lashup_manager.get_engine_list_for_tr(train_id)
+                
+                # Build command with | prefix and engine list (from Mark's RTC)
+                # Format: |<command><engine_list> where engine_list starts with comma and ends with 0xFF
+                # Example: |u4,0B06\xff (comma is part of engine_list)
+                if engine_list:
+                    full_cmd = f"|{mth_cmd}{engine_list}\r\n"
+                else:
+                    full_cmd = f"|{mth_cmd}\r\n"
+                
+                # Use latin-1 encoding to preserve raw 0xFF byte (UTF-8 would encode it as 2 bytes)
+                self.mth_socket.send(full_cmd.encode('latin-1'))
+                logger.info(f"🚂 Sent to MTH lashup {mth_id}: {full_cmd.strip()}")
                 
                 # Get response
                 self.mth_socket.settimeout(1.0)
                 try:
-                    response = self.mth_socket.recv(256).decode()
-                    logger.debug(f"📥 Lashup response: {response.strip()}")
+                    response = self.mth_socket.recv(256).decode('latin-1')
+                    if "okay" not in response.lower():
+                        logger.warning(f"📥 Lashup response (no okay): {response.strip()}")
                 except socket.timeout:
-                    pass
+                    logger.debug(f"📥 Lashup command timeout (normal)")
                 
                 return True
                 
@@ -3330,8 +3842,12 @@ class LionelMTHBridge:
             logger.error(f"❌ Lashup command error: {e}")
             return False
     
-    def _delayed_train_query(self, train_id: int, delay: float = 2.0):
-        """Query Base 3 for train data after a delay"""
+    def _delayed_train_query(self, train_id: int, delay: float = 8.0):
+        """Query Base 3 for train data after a delay with retries
+        
+        Base 3 takes 6-8 seconds to create the train entry after lashup assignment.
+        May return cached data for wrong train, so retry up to 5 times.
+        """
         time.sleep(delay)
         
         if train_id not in self.pending_train_queries:
@@ -3339,21 +3855,39 @@ class LionelMTHBridge:
         
         self.pending_train_queries.discard(train_id)
         
-        logger.info(f"📡 Querying Base 3 for TR{train_id} lashup data...")
-        train_data = self.pdi_client.query_train_data(train_id)
+        # Retry up to 5 times with 2 second intervals
+        max_retries = 5
+        retry_delay = 2.0
         
-        # Mark this TR ID as queried (won't query again unless cleared)
-        self.queried_trains.add(train_id)
-        
-        if train_data and train_data.get('consist_components'):
-            components = train_data['consist_components']
-            logger.info(f"🔗 TR{train_id} has {len(components)} engines: {components}")
-            self.lashup_manager.update_lashup(train_id, components)
-        elif train_data:
-            # Query succeeded but no consist components - not a lashup or empty
-            logger.info(f"📡 TR{train_id} has no consist data (not a lashup with engines)")
-        else:
-            logger.info(f"📡 TR{train_id} PDI query failed")
+        for attempt in range(max_retries):
+            logger.info(f"📡 Querying Base 3 for TR{train_id} lashup data (attempt {attempt + 1}/{max_retries})...")
+            train_data = self.pdi_client.query_train_data(train_id)
+            
+            if train_data and train_data.get('consist_components'):
+                components = train_data['consist_components']
+                logger.info(f"🔗 TR{train_id} has {len(components)} engines: {components}")
+                self.lashup_manager.update_lashup(train_id, components)
+                # Mark this TR ID as queried (won't query again unless cleared)
+                self.queried_trains.add(train_id)
+                return
+            elif train_data:
+                # Query succeeded but no consist components - might still be building
+                # Don't mark as queried yet - retry
+                logger.info(f"📡 TR{train_id} has no consist data yet (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                else:
+                    # Exhausted retries with empty consist - mark as queried
+                    logger.warning(f"📡 TR{train_id} has no consist data after {max_retries} attempts")
+                    self.queried_trains.add(train_id)
+            else:
+                # Query failed - retry
+                if attempt < max_retries - 1:
+                    logger.info(f"📡 TR{train_id} PDI query failed, retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                else:
+                    logger.warning(f"📡 TR{train_id} PDI query failed after {max_retries} attempts")
+                    self.queried_trains.add(train_id)
     
     def send_to_mth(self, command):
         """Send command to MTH WTIU via WiFi with proper sequence"""
@@ -3375,7 +3909,7 @@ class LionelMTHBridge:
                         self.mth_socket.send(select_cmd.encode())
                         time.sleep(0.1)  # Brief pause for engine selection
                         try:
-                            select_response = self.mth_socket.recv(256).decode()
+                            select_response = self.mth_socket.recv(256).decode('latin-1')
                             logger.info(f"🔍 Engine selection response: {select_response.strip()}")
                         except:
                             pass  # Don't fail if no response to selection
@@ -3465,6 +3999,25 @@ class LionelMTHBridge:
             elif cmd_type == 'function' and cmd_value in ['volume_up', 'volume_down']:
                 # Handle volume commands
                 return self.convert_volume(cmd_value)
+            elif cmd_type == 'function' and cmd_value == 'aux2_option1':
+                # Cab 1L AUX2 button = Headlight Toggle - track state with debounce
+                engine = self.current_lionel_engine
+                current_time = time.time()
+                if not hasattr(self, '_headlight_debounce_time'):
+                    self._headlight_debounce_time = {}
+                last_time = self._headlight_debounce_time.get(engine, 0)
+                if current_time - last_time < 0.5:  # 500ms debounce
+                    return None  # Ignore repeated command
+                self._headlight_debounce_time[engine] = current_time
+                
+                if not hasattr(self, '_engine_headlight_state'):
+                    self._engine_headlight_state = {}
+                current_state = self._engine_headlight_state.get(engine, True)  # Default ON
+                new_state = not current_state
+                self._engine_headlight_state[engine] = new_state
+                mth_cmd = "ab1" if new_state else "ab0"
+                logger.info(f"💡 Engine {engine} headlight {'ON' if new_state else 'OFF'}: {mth_cmd}")
+                return mth_cmd
             elif cmd_value in cmd_map[cmd_type]:
                 return cmd_map[cmd_type][cmd_value]
         
@@ -3555,7 +4108,7 @@ class LionelMTHBridge:
             logger.info(f"🔍 Sending discovery command: {cmd} ({desc})")
             self.mth_socket.send(f"{cmd}\r\n".encode())
             try:
-                response = self.mth_socket.recv(256).decode()
+                response = self.mth_socket.recv(256).decode('latin-1')
                 logger.info(f"🔍 Response: {response.strip()}")
             except socket.timeout:
                 logger.info(f"🔍 Timeout for {cmd}")
@@ -3587,7 +4140,7 @@ class LionelMTHBridge:
             self.mth_socket.send(f"{cmd}\r\n".encode())
             time.sleep(0.5)
             try:
-                response = self.mth_socket.recv(256).decode()
+                response = self.mth_socket.recv(256).decode('latin-1')
                 logger.info(f"🐛 DEBUG: Response: {response.strip()}")
             except socket.timeout:
                 logger.info(f"🐛 DEBUG: Timeout for {cmd}")
@@ -3596,54 +4149,6 @@ class LionelMTHBridge:
             time.sleep(0.5)
         
         logger.info("🔍 WTIU debug complete")
-        packet_count = 0
-        last_activity = time.time()
-        
-        while self.running:
-            try:
-                with self.lionel_lock:
-                    if self.lionel_serial and self.lionel_serial.is_open:
-                        # Check for any data in the buffer
-                        if self.lionel_serial.in_waiting > 0:
-                            data = self.lionel_serial.read(self.lionel_serial.in_waiting)
-                            last_activity = time.time()
-                            logger.info(f"🔍 Received {len(data)} bytes: {data.hex()}")
-                            
-                            # Look for TMCC packets
-                            for i in range(len(data) - 2):
-                                if data[i] in [0xFE, 0xF8, 0xF9, 0xFB]:
-                                    packet = data[i:i+3]
-                                    packet_count += 1
-                                    logger.info(f"🎯 TMCC Packet #{packet_count}: {packet.hex()}")
-                                    
-                                    # Parse and forward (handles both TMCC1 and Legacy)
-                                    command = self.parse_packet(packet)
-                                    if command:
-                                        protocol = command.get('protocol', 'tmcc1')
-                                        logger.info(f"📤 {protocol.upper()}: {command.get('type')} = {command.get('value')}")
-                                        
-                                        # Use Legacy-aware sending for Legacy commands
-                                        if protocol == 'legacy':
-                                            if self.send_to_mth_with_legacy(command):
-                                                logger.info("✅ Legacy → MTH")
-                                        else:
-                                            # TMCC1 - use original path
-                                            mth_cmd = self.convert_to_mth_protocol(command)
-                                            if mth_cmd:
-                                                logger.info(f"📤 MTH: {mth_cmd}")
-                                            self.send_to_mcu(command)
-                                            self.send_to_mth(command)
-                        else:
-                            # Log every 10 seconds if no data received
-                            if time.time() - last_activity > 10:
-                                logger.warning("⚠️ No data received from Lionel Base 3 for 10 seconds")
-                                last_activity = time.time()
-            
-                time.sleep(0.01)
-                
-            except Exception as e:
-                logger.error(f"Lionel listener error: {e}")
-                time.sleep(1)
     
     def lionel_listener(self):
         """Listen for TMCC packets from Lionel Base 3"""
@@ -3660,6 +4165,17 @@ class LionelMTHBridge:
                             data = self.lionel_serial.read(self.lionel_serial.in_waiting)
                             last_activity = time.time()
                             logger.info(f"🔍 Received {len(data)} bytes: {data.hex()}")
+                            
+                            # Check for PDI packets (consist broadcasts from Base 3)
+                            # PDI packets start with 0xD1 (SOP) and end with 0xDF (EOP)
+                            if PDI_SOP in data:
+                                self._process_pdi_broadcast(data)
+                            
+                            # Check for 9-byte TRAIN_ADDRESS/TRAIN_UNIT multi-word commands
+                            # Format: F8 <engine> 42/43 FB <engine> <data1> FB <engine> <data2>
+                            # 0x42 = TRAIN_ADDRESS (assigns engine to train)
+                            # 0x43 = TRAIN_UNIT (sets position: HEAD_FWD, TAIL_REV, etc.)
+                            self._process_consist_commands(data)
                             
                             # Look for TMCC packets
                             for i in range(len(data) - 2):
@@ -3702,6 +4218,214 @@ class LionelMTHBridge:
                 logger.error(f"Lionel listener error: {e}")
                 time.sleep(1)
     
+    def _process_consist_commands(self, data: bytes):
+        """Process 9-byte TRAIN_ADDRESS/TRAIN_UNIT multi-word commands for consist detection
+        
+        From Dave Swindell's analysis:
+        - ENGINE xx TRAIN_ADDRESS yy = F8 <engine> 42 FB <addr> <train_lo> FB <addr> <checksum>
+        - ENGINE xx TRAIN_UNIT pos = F8 <engine> 43 FB <addr> <position> FB <addr> <checksum>
+        
+        Position values for TRAIN_UNIT (byte 5):
+        - 0x01 = HEAD_FORWARD
+        - 0x07 = TAIL_REVERSE
+        """
+        try:
+            # Buffer for handling fragmented packets
+            if not hasattr(self, '_consist_cmd_buffer'):
+                self._consist_cmd_buffer = bytearray()
+            
+            # Track pending consist assignments
+            if not hasattr(self, '_pending_consist_engines'):
+                self._pending_consist_engines = {}  # {train_id: {engine_id: {position, direction}}}
+            
+            # Add new data to buffer
+            self._consist_cmd_buffer.extend(data)
+            
+            # Keep buffer from growing too large
+            if len(self._consist_cmd_buffer) > 1000:
+                self._consist_cmd_buffer = self._consist_cmd_buffer[-500:]
+            
+            buf = self._consist_cmd_buffer
+            i = 0
+            processed_up_to = 0
+            
+            while i < len(buf) - 8:
+                # Look for 9-byte TRAIN_ADDRESS pattern: F8 <engine> 42 FB <addr> <train> FB <addr> <checksum>
+                # Note: Engine address in Legacy multi-word is shifted left by 1 bit
+                if (buf[i] == 0xF8 and 
+                    buf[i+2] == 0x42 and 
+                    buf[i+3] == 0xFB and
+                    buf[i+6] == 0xFB):
+                    
+                    engine_id = buf[i+1] >> 1  # Decode: address is shifted left by 1
+                    train_id = buf[i+5]  # Train ID is in byte 5
+                    
+                    logger.info(f"📡 TRAIN_ADDRESS: Engine {engine_id} -> Train {train_id}")
+                    
+                    # Initialize train entry if needed
+                    if train_id not in self._pending_consist_engines:
+                        self._pending_consist_engines[train_id] = {}
+                    
+                    # Store engine assignment (position will come from TRAIN_UNIT)
+                    if engine_id not in self._pending_consist_engines[train_id]:
+                        self._pending_consist_engines[train_id][engine_id] = {'position': None, 'direction': None}
+                    
+                    processed_up_to = i + 9
+                    i += 9
+                    continue
+                
+                # Look for 9-byte TRAIN_UNIT pattern: F8 <engine> 43 FB <addr> <position> FB <addr> <checksum>
+                # Note: Engine address in Legacy multi-word is shifted left by 1 bit
+                if (buf[i] == 0xF8 and 
+                    buf[i+2] == 0x43 and 
+                    buf[i+3] == 0xFB and
+                    buf[i+6] == 0xFB):
+                    
+                    engine_id = buf[i+1] >> 1  # Decode: address is shifted left by 1
+                    position_byte = buf[i+5]  # Position is in byte 5
+                    
+                    # Decode position: 0x01=HEAD_FWD, 0x07=TAIL_REV, etc.
+                    # Bits: 0-1 = position (0=single, 1=head, 2=middle, 3=tail)
+                    # Bit 2 = direction (0=fwd, 1=rev)
+                    position = position_byte & 0x03
+                    direction = (position_byte >> 2) & 0x01
+                    
+                    pos_names = {0: 'SINGLE', 1: 'HEAD', 2: 'MIDDLE', 3: 'TAIL'}
+                    dir_names = {0: 'FWD', 1: 'REV'}
+                    
+                    logger.info(f"📡 TRAIN_UNIT: Engine {engine_id} = {pos_names.get(position, '?')}_{dir_names.get(direction, '?')}")
+                    
+                    # Find which train this engine belongs to and update position
+                    for train_id, engines in self._pending_consist_engines.items():
+                        if engine_id in engines:
+                            engines[engine_id] = {'position': position, 'direction': direction}
+                            
+                            # Check if we have complete info for all engines in this train
+                            all_complete = all(e['position'] is not None for e in engines.values())
+                            if all_complete and len(engines) >= 2:
+                                # Schedule delayed lashup creation to allow more engines to arrive
+                                # Base 3 sends engines in sequence, so we wait 2 seconds for all to arrive
+                                logger.info(f"📡 Consist detected for TR{train_id}: {len(engines)} engines so far, waiting for more...")
+                                self._schedule_lashup_creation(train_id)
+                            break
+                    
+                    processed_up_to = i + 9
+                    i += 9
+                    continue
+                
+                i += 1
+            
+            # Remove processed data from buffer
+            if processed_up_to > 0:
+                self._consist_cmd_buffer = self._consist_cmd_buffer[processed_up_to:]
+                
+        except Exception as e:
+            logger.debug(f"Consist command parse error: {e}")
+    
+    def _schedule_lashup_creation(self, train_id: int):
+        """Schedule delayed lashup creation to allow all engines to arrive
+        
+        Base 3 sends TRAIN_ADDRESS/TRAIN_UNIT commands in sequence for each engine.
+        We wait 2 seconds after detecting a complete consist to allow more engines to arrive.
+        If more engines arrive, the timer is reset.
+        """
+        import threading
+        
+        if not hasattr(self, '_lashup_creation_timers'):
+            self._lashup_creation_timers = {}
+        
+        # Cancel any existing timer for this train
+        if train_id in self._lashup_creation_timers:
+            self._lashup_creation_timers[train_id].cancel()
+        
+        def create_lashup():
+            if train_id in self._pending_consist_engines:
+                engines = self._pending_consist_engines[train_id]
+                logger.info(f"📡 Creating lashup for TR{train_id} with {len(engines)} engines: {list(engines.keys())}")
+                self._create_lashup_from_consist(train_id, engines)
+        
+        # Schedule creation after 2 seconds
+        timer = threading.Timer(2.0, create_lashup)
+        timer.daemon = True
+        timer.start()
+        self._lashup_creation_timers[train_id] = timer
+    
+    def _create_lashup_from_consist(self, train_id: int, engines: dict):
+        """Create MTH lashup from detected consist engines"""
+        try:
+            # Build consist components list
+            from dataclasses import dataclass
+            components = []
+            for engine_id, info in engines.items():
+                # Create a simple object with the needed attributes
+                class Component:
+                    def __init__(self, tmcc_id, position, direction):
+                        self.tmcc_id = tmcc_id
+                        self.position = position
+                        self.is_reversed = direction == 1
+                
+                components.append(Component(engine_id, info['position'], info['direction']))
+            
+            # Sort by position (head first, then middle, then tail)
+            components.sort(key=lambda c: c.position if c.position else 0)
+            
+            logger.info(f"📡 Creating MTH lashup for TR{train_id} from TMCC commands")
+            
+            # Use lashup manager to create the lashup
+            self.lashup_manager.update_lashup(train_id, components)
+            
+            # Clear pending engines for this train
+            if train_id in self._pending_consist_engines:
+                del self._pending_consist_engines[train_id]
+                
+        except Exception as e:
+            logger.error(f"Error creating lashup from consist: {e}")
+    
+    def _process_pdi_broadcast(self, data: bytes):
+        """Process PDI broadcast packets from Base 3 (consist info broadcasts)"""
+        try:
+            # Find PDI packets in the data stream
+            i = 0
+            while i < len(data):
+                if data[i] == PDI_SOP:
+                    # Found start of PDI packet - find the end
+                    for j in range(i + 1, len(data)):
+                        if data[j] == PDI_EOP:
+                            # Check if preceded by stuff byte
+                            if j > 0 and data[j-1] == PDI_STF:
+                                continue  # This EOP is stuffed, keep looking
+                            
+                            # Extract packet (excluding SOP and EOP)
+                            packet = data[i+1:j]
+                            logger.info(f"📡 PDI Broadcast: {packet.hex()}")
+                            
+                            # Check if this is a BASE_TRAIN packet (0x21)
+                            if len(packet) >= 3 and packet[0] == PdiCommand.BASE_TRAIN:
+                                train_id = packet[1]
+                                action = packet[2]
+                                logger.info(f"📡 PDI: Train {train_id} action {action:#x}")
+                                
+                                # Action 0x02 = read response, 0x01 = write response
+                                if action in (0x01, 0x02) and len(packet) > 10:
+                                    # This is consist data - parse it
+                                    result = self.pdi_handler._parse_train_response(packet)
+                                    if result and result.get('consist_components'):
+                                        components = result['consist_components']
+                                        logger.info(f"📡 PDI Broadcast: TR{train_id} has {len(components)} engines")
+                                        
+                                        # Update lashup manager with this consist info
+                                        self.lashup_manager.update_lashup(train_id, components)
+                            
+                            i = j + 1
+                            break
+                    else:
+                        # No EOP found, move on
+                        i += 1
+                else:
+                    i += 1
+        except Exception as e:
+            logger.debug(f"PDI broadcast parse error: {e}")
+    
     def start_tmcc_monitoring(self):
         """Start TMCC packet monitoring thread"""
         if hasattr(self, 'tmcc_thread') and self.tmcc_thread.is_alive():
@@ -3735,7 +4459,30 @@ class LionelMTHBridge:
         # Start whistle timeout monitor
         self.start_whistle_timeout_monitor()
         
+        # Start periodic MTH engine discovery (every 60 seconds)
+        self.start_periodic_engine_discovery()
+        
         return True
+    
+    def start_periodic_engine_discovery(self):
+        """Start periodic MTH engine re-discovery thread"""
+        def discovery_loop():
+            while self.running:
+                try:
+                    time.sleep(60)  # Wait 60 seconds between discoveries
+                    # Skip if lashup creation is in progress to avoid I0 spam
+                    if getattr(self, '_lashup_creation_in_progress', False):
+                        logger.debug("🔄 Skipping periodic discovery - lashup creation in progress")
+                        continue
+                    if self.mth_connected:
+                        logger.info("🔄 Periodic MTH engine re-discovery...")
+                        self.discover_mth_engines()
+                except Exception as e:
+                    logger.error(f"❌ Periodic engine discovery error: {e}")
+        
+        discovery_thread = threading.Thread(target=discovery_loop, daemon=True)
+        discovery_thread.start()
+        logger.info("🔄 Periodic MTH engine discovery started (every 60s)")
     
     def start_whistle_timeout_monitor(self):
         """Start the whistle timeout monitoring thread"""
@@ -4046,7 +4793,7 @@ def test_connection_manually():
             bridge.mth_socket.send(f"{cmd}\r\n".encode())
             time.sleep(0.5)
             try:
-                response = bridge.mth_socket.recv(256).decode()
+                response = bridge.mth_socket.recv(256).decode('latin-1')
                 logger.info(f"📥 Response: {response.strip()}")
             except:
                 logger.info("📥 No response")

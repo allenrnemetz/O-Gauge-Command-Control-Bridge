@@ -1,1 +1,8 @@
-{"lionel_port": "/dev/ttyUSB0", "legacy_enabled": true, "mth_host": "auto", "mth_port": "auto", "debug": false, "engine_mappings": {"10": 11}}
+{
+    "lionel_port": "/dev/ttyUSB0",
+    "legacy_enabled": true,
+    "mth_host": "auto",
+    "mth_port": "auto",
+    "debug": false,
+    "engine_mappings": {}
+}

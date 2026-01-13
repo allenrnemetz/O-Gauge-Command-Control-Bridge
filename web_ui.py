@@ -105,6 +105,22 @@ def reconnect():
     except Exception as e:
         return jsonify({'error': str(e)})
 
+@app.route('/api/refresh_engines')
+def refresh_engines():
+    """Re-discover MTH engines from WTIU"""
+    if not bridge:
+        return jsonify({'error': 'Bridge not running'})
+    
+    try:
+        bridge.discover_mth_engines()
+        return jsonify({
+            'success': True,
+            'available_engines': bridge.available_mth_engines,
+            'discovered_mappings': bridge.discovered_mth_engines
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
 @socketio.on('connect')
 def handle_connect():
     """Handle WebSocket connection"""
