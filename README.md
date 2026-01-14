@@ -7,6 +7,16 @@
 
 ---
 
+## Acknowledgments
+
+This project would not be possible without the foundational work of:
+
+- **[Mark DiVecchio](http://www.silogic.com/trains/RTC_Running.html)** - Reverse-engineered the MTH WTIU protocol and created the original Real Train Control software. His documentation of DCS commands, lashup creation, and WTIU communication is the foundation this bridge is built on.
+
+- **[Dave Swindell](https://github.com/cdswindell/PyLegacy)** - Created PyLegacy/PyTrain, the definitive Python library for Lionel Legacy/TMCC control. His protocol analysis and TRAIN_ADDRESS command documentation enabled automatic consist detection.
+
+---
+
 ## What Is This?
 
 This bridge translates Lionel TMCC and Legacy commands to MTH DCS commands, letting you control MTH Proto-Sound 2 and Proto-Sound 3 locomotives with your Lionel remote. Full support for both TMCC (32-step speed) and Legacy (200-step speed) protocols.
@@ -14,6 +24,7 @@ This bridge translates Lionel TMCC and Legacy commands to MTH DCS commands, lett
 ### Key Features
 
 - **Dual Protocol Support** - TMCC and Legacy protocols fully supported
+- **Mixed Consist Support** - Run Lionel and MTH engines together in the same lashup
 - **200-Step Speed Control** - Legacy's fine-grained speed control mapped to DCS sMPH
 - **ProtoWhistle/Quilling Horn** - Legacy whistle slider controls MTH whistle pitch
 - **Extended Startup/Shutdown** - Hold power button for full startup/shutdown sequences
@@ -211,9 +222,45 @@ You should see:
 
 ---
 
+## Consist/Lashup Support
+
+Build a lashup on your Lionel remote as usual. The bridge automatically detects when engines are added to a consist and creates a matching MTH lashup on the WTIU.
+
+### How It Works
+
+1. **Build your lashup** on the Lionel remote (Cab-2/Cab-3)
+2. **Bridge detects** the TRAIN_ADDRESS commands from Base 3
+3. **MTH lashup created** automatically on the WTIU
+4. **All commands sync** - speed, direction, horn/bell go to all engines
+
+### Mixed Lionel/MTH Consists
+
+You can run Lionel and MTH engines together in the same lashup:
+- Lionel engines respond via Base 3 as normal
+- MTH engines receive translated commands via the bridge
+- Speed commands are synchronized with 100ms debounce for smooth operation
+- Horn/bell commands go to the lead engine only (per prototype)
+
+### Lashup Commands
+
+| Control | Action |
+|---------|--------|
+| **Speed** | All engines in lashup |
+| **Direction** | All engines in lashup |
+| **Horn/Whistle** | Lead engine only |
+| **Bell** | Lead engine only |
+| **Startup/Shutdown** | All MTH engines in lashup |
+| **Volume** | All MTH engines in lashup |
+| **Couplers** | All MTH engines in lashup |
+
+### Breaking Up a Lashup
+
+When you clear a lashup on the Lionel side, the bridge automatically breaks up the MTH lashup and resets each engine to standalone mode.
+
+---
+
 ## Coming Soon
 
-- **Consist/Lashup Support** - Build and control multi-engine consists
 - **Additional Device Control** - Control other devices through the MCU with additional apps (room lighting scenes, etc.)
 
 ---
@@ -243,13 +290,6 @@ You should see:
 **Commands not recognized:**
 - Check log output for raw TMCC packets
 - Verify remote is paired with Base 3
-
----
-
-## Credits
-
-- **Mark DiVecchio** - MTH WTIU protocol research ([silogic.com](http://www.silogic.com/trains/RTC_Running.html))
-- **Lionel LLC** - TMCC protocol documentation
 
 ---
 
