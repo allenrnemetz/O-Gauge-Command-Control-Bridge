@@ -80,7 +80,7 @@ fi
 
 # Install required Python packages
 print_status "Installing required Python packages..."
-pip3 install --user pyserial flask flask-socketio zeroconf
+pip3 install --user pyserial zeroconf
 
 # Install system dependencies
 print_status "Installing system dependencies..."
@@ -178,43 +178,13 @@ echo "🚂 Starting Lionel MTH Bridge..."
 python3 lionel_mth_bridge.py
 EOF
 
-# Web UI startup script
-cat > start_web_ui.sh << 'EOF'
-#!/bin/bash
-# Start Lionel MTH Bridge Web UI
-
-# Get script directory
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-
-# Change to script directory
-cd "$SCRIPT_DIR"
-
-# Check if virtual environment exists
-if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv venv
-fi
-
-# Activate virtual environment
-source venv/bin/activate
-
-# Install dependencies if needed
-pip install -r requirements.txt 2>/dev/null || true
-
-# Start the web UI
-echo "🌐 Starting Web UI on http://localhost:5000"
-python3 web_ui.py
-EOF
-
 # Make scripts executable
-chmod +x start_bridge.sh start_web_ui.sh
+chmod +x start_bridge.sh
 
 # Create requirements.txt
 print_status "Creating requirements.txt..."
 cat > requirements.txt << 'EOF'
 pyserial>=3.5
-flask>=2.0.0
-flask-socketio>=5.0.0
 zeroconf>=0.39.0
 EOF
 
@@ -240,7 +210,6 @@ source venv/bin/activate
 # Test Python imports
 python3 -c "
 import serial
-import flask
 import socket
 import json
 import threading
@@ -268,10 +237,6 @@ echo "   ./start_bridge.sh"
 echo ""
 echo "Or start with systemd:"
 echo "   sudo systemctl start lionel-mth-bridge"
-echo ""
-echo "For Web UI monitoring:"
-echo "   ./start_web_ui.sh"
-echo "   Then open http://localhost:5000"
 echo ""
 echo "Check logs with:"
 echo "   tail -f logs/bridge.log"
