@@ -703,6 +703,7 @@ class LashupManager:
         self.lashup_engines = {}      # {lionel_tr_id: [engine_ids]}
         self.mth_engines_in_lashup = {}  # {lionel_tr_id: [mth_engine_ids]}
         self.engine_list_strings = {}  # {lionel_tr_id: engine_list_hex_string}
+        self.lashup_created_on_wtiu = {}  # {lionel_tr_id: bool} - True if U command succeeded
         self.available_mth_ids = list(range(MTH_LASHUP_MIN, MTH_LASHUP_MAX + 1))
         self._load_mappings()
     
@@ -849,17 +850,18 @@ class LashupManager:
             logger.warning(f"⚠️ No MTH engines to include in lashup for TR{tr_id}")
             return False
         
-        # Send lashup creation command to WTIU
-        success = self.bridge.create_mth_lashup(mth_lashup_id, engine_list)
+        # DON'T send U command here - wait until startup command like Mark's RTC
+        # The U command will be sent when we receive a startup command (u4/u6)
+        # This matches Mark's RTC behavior where lashup is created on startup, not when building consist
+        self.lashup_created_on_wtiu[tr_id] = False  # Mark as not yet created on WTIU
         
-        if success:
-            self._save_mappings()
-            if lionel_only_engines:
-                logger.info(f"✅ Created MIXED MTH lashup {mth_lashup_id} for TR{tr_id}: MTH engines only: {engine_list}")
-            else:
-                logger.info(f"✅ Created MTH lashup {mth_lashup_id} for TR{tr_id}: {engine_list}")
+        self._save_mappings()
+        if lionel_only_engines:
+            logger.info(f"📋 Registered MIXED MTH lashup {mth_lashup_id} for TR{tr_id}: MTH engines {mth_engine_ids} (U command will be sent on startup)")
+        else:
+            logger.info(f"📋 Registered MTH lashup {mth_lashup_id} for TR{tr_id}: {engine_list} (U command will be sent on startup)")
         
-        return success
+        return True
     
     def _build_mth_engine_list(self, components: list) -> str:
         """Build MTH engine list string from consist components
@@ -1955,6 +1957,14 @@ class LionelMTHBridge:
                     if current_time - last_ext_start < self.extended_command_cooldown:
                         logger.debug(f"🚂 Quick Startup ignored (extended in progress) for engine {engine}")
                         return True
+                    # Debounce quick startup to prevent flooding WTIU
+                    if not hasattr(self, '_startup_debounce'):
+                        self._startup_debounce = {}
+                    last_startup = self._startup_debounce.get(engine, 0)
+                    if current_time - last_startup < 2.0:  # 2 second debounce
+                        logger.debug(f"🚂 Quick Startup ignored (debounced) for engine {engine}")
+                        return True
+                    self._startup_debounce[engine] = current_time
                     logger.info(f"🚂 Quick Startup for engine {engine}")
                     return self.send_wtiu_command('u4')  # Quick startup
                 elif value == 'shutdown':
@@ -1963,6 +1973,14 @@ class LionelMTHBridge:
                     if current_time - last_ext_shut < self.extended_command_cooldown:
                         logger.debug(f"🚂 Quick Shutdown ignored (extended in progress) for engine {engine}")
                         return True
+                    # Debounce quick shutdown to prevent flooding WTIU
+                    if not hasattr(self, '_shutdown_debounce'):
+                        self._shutdown_debounce = {}
+                    last_shutdown = self._shutdown_debounce.get(engine, 0)
+                    if current_time - last_shutdown < 2.0:  # 2 second debounce
+                        logger.debug(f"🚂 Quick Shutdown ignored (debounced) for engine {engine}")
+                        return True
+                    self._shutdown_debounce[engine] = current_time
                     logger.info(f"🚂 Quick Shutdown for engine {engine}")
                     return self.send_wtiu_command('u5')  # Quick shutdown
                 elif value == 'startup_extended':
@@ -2017,7 +2035,9 @@ class LionelMTHBridge:
                 engine = command.get('engine', self.current_lionel_engine)
                 
                 # Check if this is a TR ID (lashup) - forward to lashup instead
+                # Cab 3 sends 0xFB packets with engine address, but if that address matches a TR ID, route to lashup
                 mth_lashup_id = self.lashup_manager.get_mth_id_for_tr(engine)
+                logger.debug(f"💨 smoke_direct: engine={engine}, mth_lashup_id={mth_lashup_id}, tr_to_mth={self.lashup_manager.tr_to_mth}")
                 if mth_lashup_id:
                     # This is a lashup - send smoke command to lashup
                     if value == 'off':
@@ -2169,8 +2189,16 @@ class LionelMTHBridge:
                         return self.send_wtiu_command(f'v0{self.master_volume}')  # v0 = master volume
                     return True  # Debounced, ignore
                     
-                # CAB3 uses Numeric 5 for shutdown
+                # CAB3 uses Numeric 5 for shutdown - debounce to prevent flooding WTIU
                 elif num == 5:
+                    engine = command.get('engine', self.current_lionel_engine)
+                    if not hasattr(self, '_shutdown_debounce'):
+                        self._shutdown_debounce = {}
+                    last_shutdown = self._shutdown_debounce.get(engine, 0)
+                    if current_time - last_shutdown < 2.0:  # 2 second debounce
+                        logger.debug(f" Legacy Numeric 5 → Shutdown (debounced)")
+                        return True
+                    self._shutdown_debounce[engine] = current_time
                     logger.info(f" Legacy Numeric 5 → Shutdown")
                     return self.send_wtiu_command('u5')
                     
@@ -3207,20 +3235,20 @@ class LionelMTHBridge:
             logger.error(f"❌ Command send error: {e}")
             return False
     
-    def create_mth_lashup(self, mth_lashup_id: int, engine_list: str, max_retries: int = 20) -> bool:
+    def create_mth_lashup(self, mth_lashup_id: int, engine_list: str, max_retries: int = 20, retry_interval: float = 2.0) -> bool:
         """Create MTH lashup on WTIU with retry logic
         
         Args:
             mth_lashup_id: MTH lashup ID (102-120)
             engine_list: ASCII hex string of DCS engine numbers (e.g., "0F8A")
-            max_retries: Maximum number of retry attempts (default 20, ~4 minutes total)
+            max_retries: Maximum number of retry attempts (default 20)
+            retry_interval: Seconds between retry attempts (default 2.0)
         
         Returns:
             True if lashup created successfully
             
-        Note: I0 queries are expensive (~10.5 seconds each per Mark's I_WAIT constant)
-        because the WTIU must poll all 100 possible engines over DCS track signal.
-        We use 12 second intervals between attempts to avoid overwhelming the WTIU.
+        Note: Like Mark's RTC, the U command is sent on startup, not when building the consist.
+        Uses retry logic because track communication can be intermittent.
         """
         if not self.mth_connected or not self.mth_socket:
             logger.warning("⚠️ Cannot create MTH lashup: WTIU not connected")
@@ -3284,7 +3312,12 @@ class LionelMTHBridge:
                             response = self.mth_socket.recv(256).decode('latin-1')
                             logger.info(f"📥 Lashup creation response: {response.strip()}")
                             
-                            if "okay" in response.lower():
+                            # Check for U command success - response must start with U and contain okay
+                            # Other commands like |u4 or |s0 may also return okay but aren't U command responses
+                            response_stripped = response.strip()
+                            is_u_response = response_stripped.startswith('U') and "okay" in response.lower()
+                            
+                            if is_u_response:
                                 # After creating lashup, send 'y' command to select head engine
                                 # Mark's RTC: "apparently the WTIU requires a 'yX' command after the 'U' command"
                                 if len(engine_list) >= 2:
@@ -3306,7 +3339,7 @@ class LionelMTHBridge:
                                 logger.warning(f"⚠️ Lashup creation failed (attempt {attempt + 1}/{max_retries}): {response.strip()}")
                                 if attempt < max_retries - 1:
                                     # Wait before retry - give WTIU time to recover
-                                    time.sleep(1.0)
+                                    time.sleep(retry_interval)
                                     continue
                             else:
                                 logger.warning(f"⚠️ Unexpected lashup response: {response}")
@@ -3315,7 +3348,7 @@ class LionelMTHBridge:
                         except socket.timeout:
                             logger.warning(f"⚠️ Lashup creation timeout (attempt {attempt + 1}/{max_retries})")
                             if attempt < max_retries - 1:
-                                time.sleep(1.0)
+                                time.sleep(retry_interval)
                                 continue
                             # On final attempt, assume success (some commands don't return response)
                             return True
@@ -3323,7 +3356,7 @@ class LionelMTHBridge:
                 except Exception as e:
                     logger.error(f"❌ MTH lashup creation error (attempt {attempt + 1}/{max_retries}): {e}")
                     if attempt < max_retries - 1:
-                        time.sleep(1.0)
+                        time.sleep(retry_interval)
                         continue
                     return False
             
@@ -3354,12 +3387,15 @@ class LionelMTHBridge:
                     mth_engines = self.lashup_manager.clear_lashup(train_id)
                     logger.info(f"🗑️ Breaking up MTH lashup for TR{train_id}")
                     
-                    # Send m4 (remove from lashup) to each engine individually
-                    # Per MTH docs: "To break up a LashUp, send the m4 command to each engine"
+                    # Send m4 (remove from lashup) then F0 (feature reset) to each engine
+                    # Per Mark's RTC: after m4, send F0 to reset engine features
                     for mth_id in mth_engines:
                         lionel_id = mth_id - 1  # Convert MTH ID back to Lionel
                         logger.info(f"🔗 Sending m4 (break lashup) to engine {lionel_id} (MTH {mth_id})")
                         self.send_wtiu_command("m4", engine=lionel_id)
+                        time.sleep(0.1)  # Brief delay between commands
+                        logger.info(f"🔗 Sending F0 (feature reset) to engine {lionel_id} (MTH {mth_id})")
+                        self.send_wtiu_command("F0", engine=lionel_id)
                         time.sleep(0.1)  # Brief delay between commands
                 # Remove from queried set so we can query again after rebuild
                 self.queried_trains.discard(train_id)
@@ -3368,14 +3404,10 @@ class LionelMTHBridge:
                 return True
             
             if cmd_value == 'assign' and train_id > 0:
-                # Assign command from train parser - query Base 3 for lashup contents
-                logger.info(f"🔗 Lashup assign for TR{train_id} - scheduling PDI query")
-                self.pending_train_queries.add(train_id)
-                threading.Thread(
-                    target=self._delayed_train_query,
-                    args=(train_id,),
-                    daemon=True
-                ).start()
+                # Assign command from train parser
+                # Note: Consist detection now uses TRAIN_ADDRESS commands from TMCC traffic
+                # No need for PDI query - the consist is detected automatically
+                logger.info(f"🔗 Lashup assign detected for TR{train_id} (using TRAIN_ADDRESS detection)")
                 return True
             
             # Position assignment commands (single/head/middle/rear) or assign_to_train
@@ -3406,16 +3438,11 @@ class LionelMTHBridge:
                     # Forward command to MTH lashup
                     logger.info(f"🔗 Forwarding TR{train_id} cmd 0x{cmd_code:03x} to MTH lashup {mth_id}")
                     self.forward_train_command_to_mth(train_id, mth_id, command)
-                elif train_id not in self.queried_trains and train_id not in self.pending_train_queries:
-                    # New TR ID - schedule PDI query (skip clear commands 0x12C)
+                elif train_id not in self.queried_trains:
+                    # New TR ID detected - consist will be detected via TRAIN_ADDRESS commands
+                    # No PDI query needed - TRAIN_ADDRESS detection handles this
                     if cmd_code != 0x12C:
-                        logger.info(f"🔗 New TR{train_id} detected - scheduling PDI query in 3s")
-                        self.pending_train_queries.add(train_id)
-                        threading.Thread(
-                            target=self._delayed_train_query,
-                            args=(train_id, 3.0),
-                            daemon=True
-                        ).start()
+                        logger.info(f"🔗 New TR{train_id} detected (using TRAIN_ADDRESS detection)")
             return True
         
         return False
@@ -3661,14 +3688,30 @@ class LionelMTHBridge:
             logger.info(f"🚂 TR{train_id} volume down -> MTH lashup {mth_id} vol {new_vol}%")
             self.send_lashup_command(mth_id, f"v0{new_vol:03d}", train_id)  # Master volume
             return
-        # 0x115 = Button 5 (Quick Shutdown)
+        # 0x115 = Button 5 (Quick Shutdown) - debounce to prevent flooding
         if cmd_code == 0x115:
+            import time
+            if not hasattr(self, '_lashup_shutdown_debounce'):
+                self._lashup_shutdown_debounce = {}
+            last_shutdown = self._lashup_shutdown_debounce.get(train_id, 0)
+            if time.time() - last_shutdown < 2.0:  # 2 second debounce
+                return
+            self._lashup_shutdown_debounce[train_id] = time.time()
             logger.info(f"🚂 TR{train_id} quick shutdown (btn 5) -> MTH lashup {mth_id}")
             self.send_lashup_command(mth_id, "u5", train_id)
             return
-        # 0x109 = AUX1 (Quick Startup)
+        # 0x109 = AUX1 (Quick Startup) - debounce to prevent flooding
         if cmd_code == 0x109:
+            import time
+            if not hasattr(self, '_lashup_startup_debounce'):
+                self._lashup_startup_debounce = {}
+            last_startup = self._lashup_startup_debounce.get(train_id, 0)
+            if time.time() - last_startup < 2.0:  # 2 second debounce
+                return
+            self._lashup_startup_debounce[train_id] = time.time()
             logger.info(f"🚂 TR{train_id} quick startup (AUX1) -> MTH lashup {mth_id}")
+            # Send U command to create lashup on WTIU (like Mark's RTC does on startup)
+            self._ensure_lashup_created_on_wtiu(train_id, mth_id)
             self.send_lashup_command(mth_id, "u4", train_id)
             return
         # 0x105 = Rear Coupler (Lionel) -> c0 (MTH front coupler fires rear on consist)
@@ -3684,6 +3727,7 @@ class LionelMTHBridge:
         # 0x10D = AUX2 (Headlight Toggle) - MTH uses ab1 (ON) / ab0 (OFF)
         if cmd_code == 0x10D:
             # Debounce: 500ms cooldown to prevent rapid toggling
+            import time
             current_time = time.time()
             if not hasattr(self, '_lashup_headlight_debounce'):
                 self._lashup_headlight_debounce = {}
@@ -3727,20 +3771,52 @@ class LionelMTHBridge:
             self.send_lashup_command(mth_id, f"v{dcs_vol:02d}00", train_id)  # Master volume
             return
         
-        # Startup/Shutdown sequences (from menu/extended)
+        # Startup/Shutdown sequences (from menu/extended) - use same debounce as quick startup
         if cmd_code == 0x1FB:  # Startup seq 1 (extended startup from menu)
+            import time
+            if not hasattr(self, '_lashup_startup_debounce'):
+                self._lashup_startup_debounce = {}
+            last_startup = self._lashup_startup_debounce.get(train_id, 0)
+            if time.time() - last_startup < 2.0:  # 2 second debounce
+                return
+            self._lashup_startup_debounce[train_id] = time.time()
             logger.info(f"🚂 TR{train_id} startup seq 1 -> MTH lashup {mth_id}")
+            # Send U command to create lashup on WTIU (like Mark's RTC does on startup)
+            self._ensure_lashup_created_on_wtiu(train_id, mth_id)
             self.send_lashup_command(mth_id, "u4", train_id)
             return
         if cmd_code == 0x1FC:  # Startup seq 2 (extended startup)
+            import time
+            if not hasattr(self, '_lashup_startup_debounce'):
+                self._lashup_startup_debounce = {}
+            last_startup = self._lashup_startup_debounce.get(train_id, 0)
+            if time.time() - last_startup < 2.0:  # 2 second debounce
+                return
+            self._lashup_startup_debounce[train_id] = time.time()
             logger.info(f"🚂 TR{train_id} extended startup -> MTH lashup {mth_id}")
+            # Send U command to create lashup on WTIU (like Mark's RTC does on startup)
+            self._ensure_lashup_created_on_wtiu(train_id, mth_id)
             self.send_lashup_command(mth_id, "u6", train_id)
             return
         if cmd_code == 0x1FD:  # Shutdown seq 1 (from menu)
+            import time
+            if not hasattr(self, '_lashup_shutdown_debounce'):
+                self._lashup_shutdown_debounce = {}
+            last_shutdown = self._lashup_shutdown_debounce.get(train_id, 0)
+            if time.time() - last_shutdown < 2.0:  # 2 second debounce
+                return
+            self._lashup_shutdown_debounce[train_id] = time.time()
             logger.info(f"🚂 TR{train_id} shutdown seq 1 -> MTH lashup {mth_id}")
             self.send_lashup_command(mth_id, "u5", train_id)
             return
         if cmd_code == 0x1FE:  # Shutdown seq 2 (extended shutdown)
+            import time
+            if not hasattr(self, '_lashup_shutdown_debounce'):
+                self._lashup_shutdown_debounce = {}
+            last_shutdown = self._lashup_shutdown_debounce.get(train_id, 0)
+            if time.time() - last_shutdown < 2.0:  # 2 second debounce
+                return
+            self._lashup_shutdown_debounce[train_id] = time.time()
             logger.info(f"🚂 TR{train_id} extended shutdown -> MTH lashup {mth_id}")
             self.send_lashup_command(mth_id, "u7", train_id)
             return
@@ -3786,6 +3862,61 @@ class LionelMTHBridge:
             return
         
         logger.debug(f"🚂 TR{train_id} unhandled command 0x{cmd_code:03x}")
+    
+    def _ensure_lashup_created_on_wtiu(self, train_id: int, mth_id: int):
+        """Start U command in background thread so it doesn't block other commands
+        
+        Like Mark's RTC, this is called on startup command (u4/u6).
+        Runs asynchronously so commands can still flow while U is retrying.
+        """
+        # Check if already created or in progress
+        if self.lashup_manager.lashup_created_on_wtiu.get(train_id, False):
+            logger.info(f"🔗 Lashup for TR{train_id} already created on WTIU")
+            return True
+        
+        # Check if already trying to create
+        if not hasattr(self, '_lashup_u_cmd_in_progress'):
+            self._lashup_u_cmd_in_progress = set()
+        
+        if train_id in self._lashup_u_cmd_in_progress:
+            logger.debug(f"🔗 Lashup creation already in progress for TR{train_id}")
+            return False
+        
+        # Get engine list for this lashup
+        engine_list = self.lashup_manager.get_engine_list_for_tr(train_id)
+        if not engine_list:
+            logger.warning(f"⚠️ No engine list for TR{train_id}, cannot create lashup on WTIU")
+            return False
+        
+        # Start U command in background thread
+        self._lashup_u_cmd_in_progress.add(train_id)
+        threading.Thread(
+            target=self._create_lashup_async,
+            args=(train_id, mth_id, engine_list),
+            daemon=True
+        ).start()
+        
+        return False  # Not created yet, but in progress
+    
+    def _create_lashup_async(self, train_id: int, mth_id: int, engine_list: str):
+        """Background thread to create lashup on WTIU with retries"""
+        logger.info(f"🔗 Creating MTH lashup on WTIU for TR{train_id} (background thread)")
+        
+        try:
+            # Send U command with 20 retries, 2 second intervals
+            success = self.create_mth_lashup(mth_id, engine_list, max_retries=20, retry_interval=2.0)
+            
+            if success:
+                self.lashup_manager.lashup_created_on_wtiu[train_id] = True
+                logger.info(f"✅ MTH lashup {mth_id} created on WTIU for TR{train_id}")
+            else:
+                # Mark as attempted but failed - won't retry until lashup is cleared
+                self.lashup_manager.lashup_created_on_wtiu[train_id] = False
+                logger.warning(f"⚠️ U command failed for TR{train_id}, horn/bell may go to all engines")
+        finally:
+            # Remove from in-progress set
+            if hasattr(self, '_lashup_u_cmd_in_progress') and isinstance(self._lashup_u_cmd_in_progress, set):
+                self._lashup_u_cmd_in_progress.discard(train_id)
     
     def send_lashup_command(self, mth_id: int, mth_cmd: str, train_id: int = None):
         """Send a command to an MTH lashup
