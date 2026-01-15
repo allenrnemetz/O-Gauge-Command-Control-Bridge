@@ -84,7 +84,7 @@ Remote → Base 3 → SER2 → FTDI → Arduino UNO Q → WiFi → WTIU → Trac
 In App Lab, click the **Connect to the board's shell** button to open the board's terminal, then run:
 
 ```bash
-cd /home/arduino/ArduinoApps/lcs-to-mth-bridge/python
+cd /home/arduino/ArduinoApps/YourAppFolderCreatedInAppLab/python
 chmod +x install.sh
 ./install.sh
 ```
@@ -262,10 +262,9 @@ When you clear a lashup on the Lionel side, the bridge automatically breaks up t
 
 | Command | Description |
 |---------|-------------|
-| `sudo systemctl start lionel-mth-bridge` | Start the bridge |
-| `sudo systemctl stop lionel-mth-bridge` | Stop the bridge |
 | `sudo systemctl restart lionel-mth-bridge` | Restart after config changes |
 | `sudo journalctl -u lionel-mth-bridge -f` | View live logs |
+| `sudo systemctl power cycle the bridge` | Power Cycle the bridge |
 
 ---
 

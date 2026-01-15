@@ -56,50 +56,18 @@ if [ "$OS" = "linux" ]; then
     print_status "Detected distribution: $DISTRO"
 fi
 
-# Install Python dependencies
-print_status "Installing Python dependencies..."
-
-# Check if pip is available
-if ! command -v pip3 &> /dev/null; then
-    print_status "Installing pip3..."
-    if [ "$DISTRO" = "debian" ]; then
-        sudo apt-get update
-        sudo apt-get install -y python3-pip
-    elif [ "$DISTRO" = "redhat" ]; then
-        sudo yum install -y python3-pip
-    elif [ "$DISTRO" = "arch" ]; then
-        sudo pacman -S --noconfirm python-pip
-    elif [ "$OS" = "macos" ]; then
-        # On macOS, pip should come with python3
-        if ! command -v python3 &> /dev/null; then
-            print_status "Installing python3..."
-            brew install python3
-        fi
-    fi
+# Create virtual environment first (required for PEP 668 compliant systems)
+print_status "Creating Python virtual environment..."
+if [ ! -d "venv" ]; then
+    python3 -m venv venv
 fi
 
-# Install required Python packages
+# Activate virtual environment
+source venv/bin/activate
+
+# Install required Python packages in venv
 print_status "Installing required Python packages..."
-pip3 install --user pyserial zeroconf
-
-# Install system dependencies
-print_status "Installing system dependencies..."
-
-if [ "$DISTRO" = "debian" ]; then
-    sudo apt-get update
-    sudo apt-get install -y python3-dev build-essential
-elif [ "$DISTRO" = "redhat" ]; then
-    sudo yum groupinstall -y "Development Tools"
-    sudo yum install -y python3-devel
-elif [ "$DISTRO" = "arch" ]; then
-    sudo pacman -S --noconfirm base-devel python
-elif [ "$OS" = "macos" ]; then
-    # Install Xcode command line tools if not present
-    if ! xcode-select -p &> /dev/null; then
-        print_status "Installing Xcode command line tools..."
-        xcode-select --install
-    fi
-fi
+pip install pyserial zeroconf
 
 # Create configuration directory
 print_status "Creating configuration directory..."
@@ -129,7 +97,7 @@ After=network.target
 Type=simple
 User=$USER
 WorkingDirectory=$(pwd)
-ExecStart=/usr/bin/python3 $(pwd)/lionel_mth_bridge.py
+ExecStart=$(pwd)/venv/bin/python $(pwd)/lionel_mth_bridge.py
 Restart=always
 RestartSec=10
 Environment=PYTHONPATH=$(pwd)
@@ -188,17 +156,6 @@ pyserial>=3.5
 zeroconf>=0.39.0
 EOF
 
-# Create virtual environment
-print_status "Creating Python virtual environment..."
-if [ ! -d "venv" ]; then
-    python3 -m venv venv
-fi
-
-# Install requirements in virtual environment
-print_status "Installing requirements in virtual environment..."
-source venv/bin/activate
-pip install -r requirements.txt
-
 # Create log directory
 print_status "Creating log directory..."
 mkdir -p logs
@@ -229,16 +186,4 @@ echo ""
 echo "🎉 Installation Complete!"
 echo "========================"
 echo ""
-echo "Next steps:"
-echo "1. Edit configuration: $CONFIG_DIR/bridge_config.json"
-echo "2. Connect your hardware (Lionel Base 3, Arduino, MTH WTIU)"
-echo "3. Start the bridge:"
-echo "   ./start_bridge.sh"
-echo ""
-echo "Or start with systemd:"
-echo "   sudo systemctl start lionel-mth-bridge"
-echo ""
-echo "Check logs with:"
-echo "   tail -f logs/bridge.log"
-echo ""
-echo "For help and troubleshooting, see README.md"
+echo "Power Cycle the Arduino Uno Q"
