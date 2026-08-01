@@ -92,6 +92,39 @@ else
     print_warning "Configuration already exists at $CONFIG_DIR/bridge_config.json"
 fi
 
+# MTH WTIU Configuration
+echo ""
+echo "🚂 MTH WTIU Configuration"
+echo "========================"
+read -p "Enter the IP address of your MTH WTIU (or 'auto' for mDNS discovery) [auto]: " MTH_IP
+MTH_IP=${MTH_IP:-auto}
+
+if [ "$MTH_IP" != "auto" ]; then
+    read -p "Enter the port of your MTH WTIU [33069]: " MTH_PORT
+    MTH_PORT=${MTH_PORT:-33069}
+    MTH_HOST="$MTH_IP:$MTH_PORT"
+    print_status "Configuring MTH WTIU at $MTH_HOST"
+
+    # Update the config file with MTH WTIU settings using Python for JSON manipulation
+    python3 << EOF
+import json
+
+config_path = "$CONFIG_DIR/bridge_config.json"
+with open(config_path, 'r') as f:
+    config = json.load(f)
+
+config['mth_host'] = "$MTH_HOST"
+config['mth_port'] = $MTH_PORT
+
+with open(config_path, 'w') as f:
+    json.dump(config, f, indent=4)
+
+print("✅ MTH WTIU configuration saved")
+EOF
+else
+    print_status "Using mDNS auto-discovery for MTH WTIU"
+fi
+
 # WLED Configuration
 echo ""
 echo "🎨 WLED LED Strip Controller Configuration"
