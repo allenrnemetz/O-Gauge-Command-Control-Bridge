@@ -560,6 +560,22 @@ class LegacyProtocolParser:
         # Range is 0xB0 (D=0) to 0xCF (D=31) - NOT 0xDF!
         if 0xB0 <= cmd_byte <= 0xCF:
             speed = cmd_byte - 0xB0
+            # TMCC1-style TRs (IDs 1-9 by convention) are 32-step only and never
+            # follow up with a 200-step command, so discarding this here would
+            # leave their absolute speed dial permanently non-functional. Only
+            # forward it when the address is actually a registered TR in that
+            # range - real Legacy engines still rely on the 200-step command
+            # that follows and keep the original discard behavior.
+            if 1 <= address <= 9 and self.bridge.lashup_manager.get_mth_id_for_tr(address):
+                logger.info(f"🔧 TMCC1 TR{address} 32-step absolute speed: {speed}/31")
+                return {
+                    'type': 'speed',
+                    'engine': address,
+                    'value': speed,
+                    'absolute': True,
+                    'scale': '32_step',
+                    'protocol': 'legacy'
+                }
             logger.info(f"🔧 Legacy 32-step speed: {speed}/31 (ignoring - use 200-step instead)")
             # Don't send 32-step speed - Legacy should use 200-step
             # Just log it and return None to ignore
@@ -1684,7 +1700,16 @@ class LionelMTHBridge:
                         self.start_tmcc_monitoring()
                     else:
                         logger.error("❌ Failed to reconnect to SER2")
-                        
+
+                # Check if the TMCC listener thread is still alive independently of
+                # the serial port's is_open state. The port can stay open at the OS
+                # level even if the listener thread died from an uncaught exception,
+                # in which case it would otherwise sit silently dead forever with no
+                # further logging and no automatic recovery.
+                elif not hasattr(self, 'tmcc_thread') or not self.tmcc_thread.is_alive():
+                    logger.warning("⚠️ TMCC listener thread is dead but serial port is open - restarting it")
+                    self.start_tmcc_monitoring()
+
                 # Check if MTH WTIU connection is still alive
                 if not self.mth_connected or not self.mth_socket:
                     logger.warning("⚠️ MTH WTIU connection lost, attempting reconnect...")
@@ -2905,9 +2930,16 @@ class LionelMTHBridge:
     
     def get_mth_engine(self, lionel_address):
         """Get MTH engine number for Lionel address
-        
+
         DCS engine = Lionel engine + 1
         (MTH human engine number = DCS engine number - 1)
+
+        Returns None if this Lionel address has no confirmed MTH mapping
+        (no manual config, not discovered via I0). Callers must treat
+        None as "do not send anything to the WTIU" - guessing lionel+1
+        for an engine that doesn't actually exist on the WTIU causes the
+        'y' select command to be ignored and commands to silently land
+        on whatever engine was previously selected.
         """
         # First check manual mappings (override)
         if str(lionel_address) in self.engine_mappings:
@@ -2917,8 +2949,8 @@ class LionelMTHBridge:
         if str(lionel_address) in self.discovered_mth_engines:
             return self.discovered_mth_engines[str(lionel_address)]
         
-        # Default: DCS engine = Lionel engine + 1
-        return lionel_address + 1
+        # No confirmed mapping - do not guess
+        return None
     
     def create_auto_engine_mapping(self):
         """Create automatic mapping from Lionel addresses to MTH engines"""
@@ -3336,6 +3368,17 @@ class LionelMTHBridge:
             # Select engine if specified and different from last selected
             if engine is None:
                 engine = self.current_lionel_engine
+
+            # If this Lionel address is actually a TR (lashup) ID, redirect to the
+            # lashup command path instead of treating it as a single engine. Without
+            # this, any command type that doesn't explicitly check for lashups (boost/
+            # brake, momentum, coupler, direction, dial speed, etc.) would try to look
+            # up a nonexistent single-engine mapping for the TR ID and get dropped.
+            mth_lashup_id = self.lashup_manager.get_mth_id_for_tr(engine)
+            if mth_lashup_id:
+                logger.debug(f"🔀 Redirecting TR{engine} command '{command}' to MTH lashup {mth_lashup_id}")
+                return self.send_lashup_command(mth_lashup_id, command, engine)
+
             mth_engine = self.get_mth_engine(engine)
             if not mth_engine:
                 logger.warning(f"⚠️ Ignoring MTH command for unmapped Lionel engine #{engine}: {command}")
@@ -4047,6 +4090,17 @@ class LionelMTHBridge:
             logger.info(f"🔗 Lashup for TR{train_id} already created on WTIU")
             return True
         
+        # DCS lashups require 2+ engines - the WTIU rejects a 1-engine U command
+        # with "input error" (a "lashup" of one isn't a valid DCS concept). When
+        # a mixed Lionel/MTH consist reduces to a single real MTH engine, there's
+        # nothing to actually create on the WTIU - send_lashup_command() will talk
+        # to that engine directly instead.
+        mth_engines = self.lashup_manager.mth_engines_in_lashup.get(train_id, [])
+        if len(mth_engines) <= 1:
+            logger.info(f"🔗 TR{train_id} has only {len(mth_engines)} MTH engine - skipping U command (single-engine passthrough)")
+            self.lashup_manager.lashup_created_on_wtiu[train_id] = True
+            return True
+        
         # Check if already trying to create
         if not hasattr(self, '_lashup_u_cmd_in_progress'):
             self._lashup_u_cmd_in_progress = set()
@@ -4106,6 +4160,34 @@ class LionelMTHBridge:
         if not self.mth_connected or not self.mth_socket:
             logger.warning("⚠️ Cannot send lashup command: WTIU not connected")
             return False
+        
+        # DCS lashups require 2+ engines - the WTIU has no concept of a 1-engine
+        # lashup and rejects the "|cmd,list" format for one. When a mixed
+        # Lionel/MTH consist reduces to a single real MTH engine, send directly
+        # to that engine instead of through the lashup engine-102 path.
+        if train_id:
+            mth_engines = self.lashup_manager.mth_engines_in_lashup.get(train_id, [])
+            if len(mth_engines) == 1:
+                dcs_engine = mth_engines[0] & 0x7F  # Strip reverse-direction bit
+                try:
+                    with self.mth_lock:
+                        if dcs_engine != getattr(self, '_last_selected_engine', None):
+                            self.mth_socket.send(f"y{dcs_engine}\r\n".encode())
+                            self._last_selected_engine = dcs_engine
+                            time.sleep(0.05)
+                        self.mth_socket.send(f"{mth_cmd}\r\n".encode('latin-1'))
+                        logger.info(f"🚂 TR{train_id} (single MTH engine {dcs_engine}) -> {mth_cmd}")
+                        self.mth_socket.settimeout(1.0)
+                        try:
+                            response = self.mth_socket.recv(256).decode('latin-1')
+                            if "okay" not in response.lower():
+                                logger.warning(f"📥 Single-engine TR response (no okay): {response.strip()}")
+                        except socket.timeout:
+                            logger.debug("📥 Single-engine TR command timeout (normal)")
+                        return True
+                except Exception as e:
+                    logger.error(f"❌ Single-engine TR command error: {e}")
+                    return False
         
         try:
             with self.mth_lock:
