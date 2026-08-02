@@ -31,15 +31,84 @@ import subprocess
 import re
 import json
 import os
+import glob
 import queue
 from queue import Queue, Empty
 import struct
+import random
 
 # Optional WLED accessory integration
 try:
     from tmcc_wled import WLEDController
 except Exception:
     WLEDController = None
+
+# Thunder sound player helper
+import subprocess
+
+def play_thunder(delay_ms: int, sound_dir: str = "/home/pi/sounds", audio_device: str = "plughw:2,0") -> None:
+    """Play thunder sound after a delay (simulates distance from lightning).
+    
+    Selects appropriate thunder file based on delay:
+    - Close (< 400ms): "close thunder.wav"
+    - Medium (400-1200ms): "thunder1.wav", "thunder2.wav" (generic)
+    - Distant (1200-2000ms): "distant thunder.wav"
+    - Very distant (> 2000ms): "very distant thunder.wav"
+    
+    Args:
+        delay_ms: Delay in milliseconds before playing thunder
+        sound_dir: Directory containing thunder WAV files
+        audio_device: ALSA audio device (e.g. "plughw:2,0" for USB audio)
+    """
+    time.sleep(delay_ms / 1000.0)
+    
+    # Categorize thunder files by distance
+    close_files = []
+    medium_files = []
+    distant_files = []
+    very_distant_files = []
+    
+    try:
+        import os
+        for f in os.listdir(sound_dir):
+            if not f.lower().endswith('.wav'):
+                continue
+            f_lower = f.lower()
+            full_path = os.path.join(sound_dir, f)
+            if 'very distant' in f_lower:
+                very_distant_files.append(full_path)
+            elif 'distant' in f_lower:
+                distant_files.append(full_path)
+            elif 'close' in f_lower:
+                close_files.append(full_path)
+            elif 'thunder' in f_lower:
+                medium_files.append(full_path)
+    except Exception:
+        pass
+    
+    # Select file based on delay (distance)
+    if delay_ms < 400 and close_files:
+        sound_file = random.choice(close_files)
+    elif delay_ms < 1200 and medium_files:
+        sound_file = random.choice(medium_files)
+    elif delay_ms < 2000 and distant_files:
+        sound_file = random.choice(distant_files)
+    elif very_distant_files:
+        sound_file = random.choice(very_distant_files)
+    else:
+        # Fallback to any thunder file
+        all_files = close_files + medium_files + distant_files + very_distant_files
+        sound_file = random.choice(all_files) if all_files else None
+    
+    if sound_file:
+        try:
+            # Use pw-play (PipeWire) instead of aplay for compatibility with modern audio systems
+            subprocess.Popen(['pw-play', sound_file], 
+                           stdout=subprocess.DEVNULL, 
+                           stderr=subprocess.DEVNULL)
+            logger.info(f"🌩️ Thunder: {sound_file} (delay {delay_ms}ms)")
+        except Exception as e:
+            logger.debug(f"Thunder playback failed: {e}")
 
 # PDI Protocol Constants (from pytrain-ogr)
 PDI_SOP = 0xD1  # Start of Packet
@@ -1384,7 +1453,8 @@ class LionelMTHBridge:
         self.settings = self.config.load()
         
         # Apply configuration settings
-        self.lionel_port = self.settings.get('lionel_port', '/dev/ttyUSB0')
+        self._configured_lionel_port = self.settings.get('lionel_port', '/dev/ttyUSB0')
+        self.lionel_port = self._resolve_lionel_port()
         self.mth_host = self.settings.get('mth_host', 'auto')
         self.mth_port = self.settings.get('mth_port', 'auto')
         self.engine_mappings = self.settings.get('engine_mappings', {})
@@ -1409,6 +1479,14 @@ class LionelMTHBridge:
                             continue
                         mapping_dict[(acc_addr, data_val)] = action
 
+                # Create thunder callback if sound is enabled
+                sound_dir = wled_cfg.get('sound_dir', '/home/arnemetz/Layout Sounds')
+                audio_device = wled_cfg.get('audio_device', 'plughw:2,0')
+                thunder_enabled = wled_cfg.get('thunder_enabled', True)
+                thunder_cb = None
+                if thunder_enabled:
+                    thunder_cb = lambda delay_ms, sd=sound_dir, ad=audio_device: play_thunder(delay_ms, sd, ad)
+                
                 self.wled_controller = WLEDController(
                     host=wled_cfg.get('host', '192.168.0.10'),
                     port=wled_cfg.get('port', 80),
@@ -1420,7 +1498,13 @@ class LionelMTHBridge:
                     moon_start=wled_cfg.get('moon_start', 0),
                     moon_length=wled_cfg.get('moon_length', 5),
                     lightning_every_n_cycles=wled_cfg.get('lightning_every_n_cycles', 3),
+                    thunder_callback=thunder_cb,
+                    auto_start_daylight=False,  # Never auto-start; user must trigger via TMCC command
                 )
+                # Turn LEDs off on startup (user must explicitly start daylight cycle)
+                if wled_cfg.get('off_on_startup', True):
+                    self.wled_controller.client.post_state({"on": False})
+                    logger.info(f"🧩 WLED LEDs turned OFF on startup")
                 logger.info(f"🧩 WLED controller enabled for host {wled_cfg.get('host', '192.168.0.10')}")
             except Exception as e:
                 logger.error(f"❌ Failed to init WLED controller: {e}")
@@ -1567,6 +1651,7 @@ class LionelMTHBridge:
         attempt = 0
         
         while self.running and attempt < self.max_reconnect_attempts:
+            self.lionel_port = self._resolve_lionel_port()
             try:
                 # Try to open the port to see if SER2 is connected
                 test_serial = serial.Serial(self.lionel_port, baudrate=9600, timeout=1)
@@ -1619,6 +1704,18 @@ class LionelMTHBridge:
         self.monitor_thread.start()
         logger.info("🔍 Connection monitor started")
         
+    def _resolve_lionel_port(self):
+        """Return an available Lionel serial port. If the configured port exists, use it;
+        otherwise scan /dev/ttyUSB* and /dev/ttyACM* for any available adapter."""
+        configured = self._configured_lionel_port
+        if configured not in ('auto', '') and os.path.exists(configured):
+            return configured
+        for pattern in ('/dev/ttyUSB*', '/dev/ttyACM*'):
+            for path in sorted(glob.glob(pattern)):
+                if os.path.exists(path):
+                    return path
+        return configured
+
     def connect_lionel(self):
         """Connect to Lionel Base 3 via FTDI"""
         try:
@@ -3240,7 +3337,10 @@ class LionelMTHBridge:
             if engine is None:
                 engine = self.current_lionel_engine
             mth_engine = self.get_mth_engine(engine)
-            if mth_engine and mth_engine != getattr(self, '_last_selected_engine', None):
+            if not mth_engine:
+                logger.warning(f"⚠️ Ignoring MTH command for unmapped Lionel engine #{engine}: {command}")
+                return False
+            if mth_engine != getattr(self, '_last_selected_engine', None):
                 select_cmd = f"y{mth_engine}\r\n".encode()
                 self.mth_socket.send(select_cmd)
                 self._last_selected_engine = mth_engine
