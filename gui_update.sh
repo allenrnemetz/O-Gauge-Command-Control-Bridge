@@ -188,6 +188,7 @@ LOG_FILE="/tmp/lionel_mth_bridge_update_$$.log"
     #          bridge_config.json (only if user's config is elsewhere), README.md, etc.
     FILES_TO_COPY="lionel_mth_bridge.py tmcc_wled.py install.sh gui_install.sh gui_update.sh
                    'Install Bridge.desktop' 'Update Bridge.desktop' 'START HERE.txt'
+                   setup.sh
                    README.md LICENSE lionel-mth-bridge.service .gitignore .gitattributes
                    hacs.json"
 
@@ -195,6 +196,13 @@ LOG_FILE="/tmp/lionel_mth_bridge_update_$$.log"
         if [ -f "$EXTRACTED_DIR/$f" ]; then
             cp "$EXTRACTED_DIR/$f" "$INSTALL_DIR/" 2>/dev/null || true
         fi
+    done
+
+    # Fix permissions on .desktop and .sh files so double-click works
+    chmod +x "$INSTALL_DIR"/*.sh 2>/dev/null || true
+    chmod +x "$INSTALL_DIR"/*.desktop 2>/dev/null || true
+    for df in "$INSTALL_DIR"/*.desktop; do
+        [ -f "$df" ] && gio set "$df" metadata::trusted true 2>/dev/null || true
     done
 
     # Copy the home_assistant directory (for HA integration files)
