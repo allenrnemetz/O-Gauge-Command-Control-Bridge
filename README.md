@@ -359,6 +359,49 @@ Set `enabled` to `false` to disable the proxy if not needed.
 
 ---
 
+## Home Assistant Integration
+
+Monitor your bridge from Home Assistant — see connection status and engine libraries from both the Lionel Base 3 and MTH WTIU, all in your HA dashboard.
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?repository=lionel_mth_bridge&owner=allenrnemetz)
+
+[![Add integration to Home Assistant](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start?domain=lionel_mth_bridge)
+
+### What You Get
+
+| Entity | Type | Shows |
+|--------|------|-------|
+| Bridge Online | Binary sensor | Bridge process running |
+| Base 3 Connected | Binary sensor | SER2 / Base 3 connection state |
+| WTIU Connected | Binary sensor | MTH WTIU connection state |
+| WTIU Host | Sensor | WTIU IP address |
+| Lionel Engine Count | Sensor | Number of engines in Base 3 library |
+| MTH Engine Count | Sensor | Number of MTH engines on track |
+| Engine sensors | Sensors | Per-engine name, road number, and type |
+| Refresh Engines | Button | Triggers a rescan of both WTIU and Base 3 libraries |
+
+### Prerequisites
+
+- The bridge must be running version **1.4.0** or later (includes the HTTP status endpoint)
+- [HACS](https://hacs.xyz) must be installed in your Home Assistant instance
+- Home Assistant and the bridge must be on the same network
+
+### Installation
+
+1. Click the blue **HACS** button above — it opens HACS in your HA instance with this repo pre-filled
+2. Click **Download** to install the integration
+3. Click the blue **Add Integration** button above (or go to Settings → Devices & Services → Add Integration → search "Lionel MTH Bridge")
+4. Enter your bridge's IP address and port (default: `8580`)
+5. Done — entities appear automatically and update every 30 seconds
+
+### How It Works
+
+The bridge runs a lightweight HTTP endpoint (port 8580) that serves JSON status data. The HA integration polls it every 30 seconds — no MQTT broker, no extra software, no YAML configuration.
+
+The endpoint is read-only. Home Assistant cannot send commands to your trains. The only action HA can take is triggering an engine library rescan via the Refresh button.
+
+---
+
 ## Service Commands
 
 | Command | Description |

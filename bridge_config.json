@@ -5,6 +5,7 @@
     "mth_port": "auto",
     "debug": false,
     "engine_mappings": {},
+    "engine_name_overrides": {},
     "wled": {
         "enabled": true,
         "host": "192.168.0.10",
@@ -28,5 +29,9 @@
                 "20": "daylight_stop"
             }
         }
+    },
+    "ha_status": {
+        "enabled": false,
+        "port": 8580
     }
 }

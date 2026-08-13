@@ -4,7 +4,8 @@
 #
 # Can be run interactively (default) or non-interactively by setting
 # NONINTERACTIVE=1 and providing config via environment variables:
-#   PI_USER, MTH_IP, MTH_PORT, CONFIGURE_WLED, WLED_IP, WLED_ACC_ID, WLED_LED_COUNT
+#   PI_USER, MTH_IP, MTH_PORT, CONFIGURE_WLED, WLED_IP, WLED_ACC_ID, WLED_LED_COUNT,
+#   CONFIGURE_HA, HA_PORT
 # When NONINTERACTIVE=1, any unset variable falls back to its default.
 
 set -e  # Exit on any error
@@ -94,6 +95,48 @@ print_status "Service will run as user: $PI_USER"
 # Get the home directory for the specified user
 PI_HOME=$(eval echo ~$PI_USER)
 print_status "Home directory: $PI_HOME"
+
+# --- Relocate to a clean install directory ---
+# The user may have extracted the ZIP anywhere (Downloads, Desktop, etc).
+# We install to a fixed, predictable location so the updater can find it.
+INSTALL_DIR="$PI_HOME/lionel-mth-bridge"
+CURRENT_DIR="$(pwd)"
+
+# If we're not already in the install directory, copy files there
+if [ "$CURRENT_DIR" != "$INSTALL_DIR" ]; then
+    print_status "Setting up install directory: $INSTALL_DIR"
+
+    # If an existing install is already there, preserve config and venv
+    if [ -d "$INSTALL_DIR" ]; then
+        print_warning "Existing installation found at $INSTALL_DIR — updating files"
+    else
+        mkdir -p "$INSTALL_DIR"
+    fi
+
+    # Copy all bridge files to the install directory
+    # (rsync would be cleaner but may not be installed; use cp)
+    for f in lionel_mth_bridge.py tmcc_wled.py install.sh gui_install.sh gui_update.sh \
+             "Install Bridge.desktop" "Update Bridge.desktop" "START HERE.txt" \
+             README.md LICENSE bridge_config.json .gitignore .gitattributes; do
+        if [ -f "$CURRENT_DIR/$f" ]; then
+            cp "$CURRENT_DIR/$f" "$INSTALL_DIR/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy the home_assistant directory if it exists
+    if [ -d "$CURRENT_DIR/home_assistant" ]; then
+        cp -r "$CURRENT_DIR/home_assistant" "$INSTALL_DIR/" 2>/dev/null || true
+    fi
+
+    # Copy hacs.json if it exists
+    if [ -f "$CURRENT_DIR/hacs.json" ]; then
+        cp "$CURRENT_DIR/hacs.json" "$INSTALL_DIR/" 2>/dev/null || true
+    fi
+
+    # Change to the install directory for the rest of the script
+    cd "$INSTALL_DIR"
+    print_status "Now working in: $INSTALL_DIR"
+fi
 
 # Create virtual environment first (required for PEP 668 compliant systems)
 print_status "Creating Python virtual environment..."
@@ -208,12 +251,66 @@ else
     print_status "Skipping WLED configuration"
 fi
 
+# Home Assistant Status Endpoint Configuration
+echo ""
+echo "📊 Home Assistant Status Endpoint"
+echo "=================================="
+echo "The bridge can expose an HTTP endpoint for Home Assistant integration."
+echo "This lets HA monitor bridge status and engine libraries."
+prompt_with_default CONFIGURE_HA "Do you use Home Assistant? (y/n)" "n"
+
+if [[ "$CONFIGURE_HA" =~ ^[Yy]$ ]]; then
+    prompt_with_default HA_PORT "Enter the port for the HA status endpoint" "8580"
+
+    print_status "Configuring HA status endpoint on port $HA_PORT"
+
+    python3 << EOF
+import json
+
+config_path = "$CONFIG_DIR/bridge_config.json"
+with open(config_path, 'r') as f:
+    config = json.load(f)
+
+config['ha_status'] = {
+    "enabled": True,
+    "port": $HA_PORT
+}
+
+with open(config_path, 'w') as f:
+    json.dump(config, f, indent=4)
+
+print("✅ HA status endpoint configuration saved")
+EOF
+
+    echo ""
+    echo "HA status endpoint will be available at:"
+    echo "  http://<this-pi-ip>:$HA_PORT/status"
+else
+    print_status "HA status endpoint disabled"
+    # Explicitly disable in config
+    python3 << EOF
+import json
+
+config_path = "$CONFIG_DIR/bridge_config.json"
+with open(config_path, 'r') as f:
+    config = json.load(f)
+
+config['ha_status'] = {
+    "enabled": False,
+    "port": 8580
+}
+
+with open(config_path, 'w') as f:
+    json.dump(config, f, indent=4)
+EOF
+fi
+
 # Create systemd service file
 print_status "Creating systemd service..."
 SERVICE_FILE="/etc/systemd/system/lionel-mth-bridge.service"
 
 # Create service file content using the specified username
-INSTALL_DIR=$(pwd)
+# INSTALL_DIR was set earlier when we relocated to ~/lionel-mth-bridge
 SERVICE_CONTENT="[Unit]
 Description=Lionel MTH Bridge Service
 After=network-online.target
@@ -227,6 +324,11 @@ ExecStartPre=/bin/sleep 10
 ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/lionel_mth_bridge.py
 Restart=always
 RestartSec=5
+# Limit journald log size for this service to 50MB
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=1000
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target"
@@ -238,6 +340,22 @@ echo "$SERVICE_CONTENT" | sudo tee "$SERVICE_FILE" > /dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable lionel-mth-bridge.service
 print_status "Systemd service created and enabled"
+
+# Set up automatic log cleanup — keep journal from growing unbounded
+print_status "Setting up automatic log cleanup..."
+
+# Create a daily cron job that vacuums old journal entries (keeps last 7 days)
+CRON_SCRIPT="/etc/cron.daily/lionel-mth-bridge-log-cleanup"
+cat << 'CRONEOF' | sudo tee "$CRON_SCRIPT" > /dev/null
+#!/bin/bash
+# Clean up old bridge logs — keep last 30 days of journald entries
+journalctl --vacuum-time=30d --quiet 2>/dev/null || true
+
+# Also clean up any log files in the install directory (older than 30 days)
+find "$HOME/lionel-mth-bridge/logs" -name "*.log" -mtime +30 -delete 2>/dev/null || true
+CRONEOF
+sudo chmod +x "$CRON_SCRIPT"
+print_status "Log cleanup cron job installed (keeps 30 days of logs)"
 
 # Create startup scripts
 print_status "Creating startup scripts..."
@@ -280,7 +398,7 @@ pyserial>=3.5
 zeroconf>=0.39.0
 EOF
 
-# Create log directory
+# Create log directory (for any future log files; cleaned up automatically after 7 days)
 print_status "Creating log directory..."
 mkdir -p logs
 
@@ -328,6 +446,14 @@ echo ""
 echo "TCP Serial Proxy is available at: $PI_IP:5111"
 echo "  - PyTrain can connect using: pytrain -ser2 $PI_IP:5111"
 echo ""
+
+# Show HA endpoint info if enabled
+if [[ "$CONFIGURE_HA" =~ ^[Yy]$ ]]; then
+    echo "Home Assistant status endpoint: http://$PI_IP:$HA_PORT/status"
+    echo "  - In Home Assistant, add this IP and port when configuring the integration"
+    echo ""
+fi
+
 echo "Useful commands:"
 echo "  sudo systemctl status lionel-mth-bridge   # Check status"
 echo "  sudo journalctl -u lionel-mth-bridge -f   # View logs"

@@ -181,7 +181,34 @@ else
     CONFIGURE_WLED="n"
 fi
 
-# --- Step 4: Confirm ---
+# --- Step 4: Home Assistant ---
+zenity --question \
+    --title="Step 4 of 5: Home Assistant" \
+    --text="Do you use Home Assistant?\n\n\
+The bridge can expose a status endpoint that lets Home\n\
+Assistant monitor bridge connections and engine libraries.\n\n\
+If you don't use Home Assistant, click No." \
+    --width=450 2>/dev/null
+
+if [ $? -eq 0 ]; then
+    CONFIGURE_HA="y"
+
+    HA_PORT=$(zenity --entry \
+        --title="Home Assistant: Status Port" \
+        --text="Enter the port for the HA status endpoint.\n\n\
+Home Assistant will connect to this port to read bridge status.\n\
+Default is 8580." \
+        --entry-text="8580" \
+        --width=400 2>/dev/null) || die "Installation cancelled."
+
+    if [ -z "$HA_PORT" ]; then
+        HA_PORT="8580"
+    fi
+else
+    CONFIGURE_HA="n"
+fi
+
+# --- Step 5: Confirm ---
 CONFIRM_TEXT="Ready to install with these settings:\n\n\
   Username:       $PI_USER\n\
   MTH WTIU:       $MTH_IP"
@@ -198,13 +225,22 @@ else
     CONFIRM_TEXT="$CONFIRM_TEXT No"
 fi
 
+CONFIRM_TEXT="$CONFIRM_TEXT\n\
+  Home Assistant: "
+
+if [ "$CONFIGURE_HA" = "y" ]; then
+    CONFIRM_TEXT="$CONFIRM_TEXT Yes (port: $HA_PORT)"
+else
+    CONFIRM_TEXT="$CONFIRM_TEXT No"
+fi
+
 CONFIRM_TEXT="$CONFIRM_TEXT\n\n\
 You may be asked for your administrator password next.\n\
 This is needed to install the system service.\n\n\
 Click OK to begin installation."
 
 zenity --question \
-    --title="Step 4 of 4: Confirm" \
+    --title="Step 5 of 5: Confirm" \
     --text="$CONFIRM_TEXT" \
     --ok-label="Install" \
     --cancel-label="Cancel" \
@@ -219,6 +255,8 @@ export CONFIGURE_WLED
 export WLED_IP
 export WLED_ACC_ID
 export WLED_LED_COUNT
+export CONFIGURE_HA
+export HA_PORT
 export NONINTERACTIVE=1
 
 # Run install.sh and capture output, showing a progress dialog
@@ -268,10 +306,22 @@ if [ -z "$HOST_IP" ]; then
 fi
 
 # --- Success dialog ---
+# Find the install directory (install.sh relocates to ~/lionel-mth-bridge)
+INSTALL_DIR=$(systemctl show lionel-mth-bridge -p WorkingDirectory --value 2>/dev/null || echo "$HOME/lionel-mth-bridge")
+
 SUCCESS_TEXT="Installation complete!\n\n\
 The bridge is now running and will start automatically on boot.\n\n\
+Install location: $INSTALL_DIR\n\n\
 TCP Serial Proxy (for PyTrain):\n  $HOST_IP:5111\n\
-  Connect with:  pytrain -ser2 $HOST_IP:5111\n\n\
+  Connect with:  pytrain -ser2 $HOST_IP:5111\n"
+
+if [ "$CONFIGURE_HA" = "y" ]; then
+    SUCCESS_TEXT="$SUCCESS_TEXT\n\
+Home Assistant status endpoint:\n  http://$HOST_IP:$HA_PORT/status\n\
+  Enter this IP and port when adding the integration in HA.\n"
+fi
+
+SUCCESS_TEXT="$SUCCESS_TEXT\n\
 Useful commands (in a terminal):\n\
   sudo systemctl status lionel-mth-bridge\n\
   sudo journalctl -u lionel-mth-bridge -f\n\

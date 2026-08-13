@@ -188,13 +188,20 @@ LOG_FILE="/tmp/lionel_mth_bridge_update_$$.log"
     #          bridge_config.json (only if user's config is elsewhere), README.md, etc.
     FILES_TO_COPY="lionel_mth_bridge.py tmcc_wled.py install.sh gui_install.sh gui_update.sh
                    'Install Bridge.desktop' 'Update Bridge.desktop' 'START HERE.txt'
-                   README.md LICENSE lionel-mth-bridge.service .gitignore .gitattributes"
+                   README.md LICENSE lionel-mth-bridge.service .gitignore .gitattributes
+                   hacs.json"
 
     for f in $FILES_TO_COPY; do
         if [ -f "$EXTRACTED_DIR/$f" ]; then
             cp "$EXTRACTED_DIR/$f" "$INSTALL_DIR/" 2>/dev/null || true
         fi
     done
+
+    # Copy the home_assistant directory (for HA integration files)
+    if [ -d "$EXTRACTED_DIR/home_assistant" ]; then
+        rm -rf "$INSTALL_DIR/home_assistant" 2>/dev/null || true
+        cp -r "$EXTRACTED_DIR/home_assistant" "$INSTALL_DIR/" 2>/dev/null || true
+    fi
 
     # Don't overwrite the user's bridge_config.json in the install dir —
     # the real config lives in ~/.lionel-mth-bridge/bridge_config.json
@@ -207,6 +214,21 @@ LOG_FILE="/tmp/lionel_mth_bridge_update_$$.log"
         pip install --upgrade pyserial zeroconf 2>&1 || true
     else
         echo "WARNING: venv not found at $INSTALL_DIR/venv — skipping dependency refresh" >&2
+    fi
+
+    echo "# Setting up log cleanup..." >&2
+    # Install log cleanup cron job if not already present (added in v1.4)
+    CRON_SCRIPT="/etc/cron.daily/lionel-mth-bridge-log-cleanup"
+    if [ ! -f "$CRON_SCRIPT" ]; then
+        cat << 'CRONEOF' | sudo -A tee "$CRON_SCRIPT" > /dev/null 2>&1
+#!/bin/bash
+# Clean up old bridge logs — keep last 30 days of journald entries
+journalctl --vacuum-time=30d --quiet 2>/dev/null || true
+
+# Also clean up any log files in the install directory (older than 30 days)
+find "$HOME/lionel-mth-bridge/logs" -name "*.log" -mtime +30 -delete 2>/dev/null || true
+CRONEOF
+        sudo -A chmod +x "$CRON_SCRIPT" 2>/dev/null || true
     fi
 
     echo "# Restarting bridge service..." >&2
@@ -260,12 +282,86 @@ if grep -q "^SUCCESS:" "$LOG_FILE" 2>/dev/null; then
 Check with: sudo systemctl status lionel-mth-bridge"
     fi
 
+    # Check if HA status endpoint is configured
+    HA_INFO=""
+    CONFIG_FILE="$HOME/.lionel-mth-bridge/bridge_config.json"
+
+    if [ -f "$CONFIG_FILE" ]; then
+        # Check if ha_status is already in the config file
+        HA_EXISTS=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print('yes' if 'ha_status' in c else 'no')" 2>/dev/null || echo "no")
+
+        if [ "$HA_EXISTS" = "no" ]; then
+            # v1.3 user upgrading — ha_status not in their config yet
+            # Ask if they want to enable the HA endpoint
+            zenity --question \
+                --title="Home Assistant" \
+                --text="This version adds Home Assistant integration.\n\n\
+The bridge can expose a status endpoint that lets Home\n\
+Assistant monitor bridge connections and engine libraries.\n\n\
+Do you use Home Assistant?" \
+                --width=450 2>/dev/null
+
+            if [ $? -eq 0 ]; then
+                # User wants HA — ask for port
+                HA_PORT=$(zenity --entry \
+                    --title="Home Assistant: Status Port" \
+                    --text="Enter the port for the HA status endpoint.\n\n\
+Home Assistant will connect to this port to read bridge status.\n\
+Default is 8580." \
+                    --entry-text="8580" \
+                    --width=400 2>/dev/null) || HA_PORT="8580"
+
+                if [ -z "$HA_PORT" ]; then
+                    HA_PORT="8580"
+                fi
+
+                # Write ha_status to config
+                python3 -c "
+import json
+config_path = '$CONFIG_FILE'
+with open(config_path, 'r') as f:
+    config = json.load(f)
+config['ha_status'] = {'enabled': True, 'port': $HA_PORT}
+with open(config_path, 'w') as f:
+    json.dump(config, f, indent=4)
+" 2>/dev/null
+
+                HA_INFO="\n\nHome Assistant endpoint: http://$HOST_IP:$HA_PORT/status\n\
+  To use with HA, install the 'Lionel MTH Bridge' integration via HACS.\n\
+  See the Home Assistant section in README.md for setup instructions."
+
+                # Restart the service so the endpoint starts
+                sudo -A systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+            else
+                # User doesn't want HA — explicitly disable it
+                python3 -c "
+import json
+config_path = '$CONFIG_FILE'
+with open(config_path, 'r') as f:
+    config = json.load(f)
+config['ha_status'] = {'enabled': False, 'port': 8580}
+with open(config_path, 'w') as f:
+    json.dump(config, f, indent=4)
+" 2>/dev/null
+            fi
+        else
+            # ha_status already configured — just read it
+            HA_PORT=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('ha_status',{}).get('port',8580))" 2>/dev/null || echo "8580")
+            HA_ENABLED=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('ha_status',{}).get('enabled',True))" 2>/dev/null || echo "True")
+            if [ "$HA_ENABLED" = "True" ]; then
+                HA_INFO="\n\nHome Assistant endpoint: http://$HOST_IP:$HA_PORT/status\n\
+  To use with HA, install the 'Lionel MTH Bridge' integration via HACS.\n\
+  See the Home Assistant section in README.md for setup instructions."
+            fi
+        fi
+    fi
+
     zenity --info \
         --title="Update Complete" \
         --text="The bridge has been updated to version $NEW_VERSION.\n\n\
 $STATUS_TEXT\n\n\
-TCP Serial Proxy: $HOST_IP:5111" \
-        --width=450 2>/dev/null
+TCP Serial Proxy: $HOST_IP:5111$HA_INFO" \
+        --width=500 2>/dev/null
 else
     # Show error with log tail
     ERROR_TAIL=$(tail -15 "$LOG_FILE" 2>/dev/null | grep -v '^#' || echo "See log for details")

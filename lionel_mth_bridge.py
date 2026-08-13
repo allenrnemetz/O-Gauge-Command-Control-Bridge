@@ -36,6 +36,7 @@ import queue
 from queue import Queue, Empty
 import struct
 import random
+import http.server
 
 # Optional WLED accessory integration
 try:
@@ -140,7 +141,17 @@ logger = logging.getLogger(__name__)
 
 class Config:
     def __init__(self):
-        self.config_file = "bridge_config.json"
+        # Use the persistent config directory (~/.lionel-mth-bridge/) so
+        # config survives updates and is shared with lashup mappings.
+        # Fall back to the local file if the config dir doesn't exist yet
+        # (e.g. running from source without installing).
+        config_dir = os.path.expanduser("~/.lionel-mth-bridge")
+        persistent_path = os.path.join(config_dir, "bridge_config.json")
+        local_path = "bridge_config.json"
+        if os.path.exists(persistent_path) or os.path.exists(config_dir):
+            self.config_file = persistent_path
+        else:
+            self.config_file = local_path
         self.defaults = {
             "lionel_port": "/dev/ttyUSB0",
             "mth_host": "auto",
@@ -148,6 +159,7 @@ class Config:
             "debug": False,
             "log_level": "INFO",
             "engine_mappings": {},  # Empty for auto-discovery
+            "engine_name_overrides": {},  # Manual name overrides: {"mth": {"1": "My Engine"}, "lionel": {"5": "Big Boy"}}
             "connection_settings": {
                 "max_reconnect_attempts": 10,
                 "connection_check_interval": 5,
@@ -185,6 +197,10 @@ class Config:
             "tcp_proxy": {
                 "enabled": True,
                 "port": 5111
+            },
+            "ha_status": {
+                "enabled": False,
+                "port": 8580
             }
         }
     
@@ -195,6 +211,10 @@ class Config:
         return self.defaults
     
     def save(self, config):
+        # Ensure the directory exists (in case config_file is in ~/.lionel-mth-bridge/)
+        config_dir = os.path.dirname(self.config_file)
+        if config_dir and not os.path.exists(config_dir):
+            os.makedirs(config_dir, exist_ok=True)
         with open(self.config_file, 'w') as f:
             json.dump(config, f, indent=2)
 
@@ -1315,8 +1335,147 @@ class PdiClient:
             logger.error(f"❌ PDI parse error: {e}")
             return None
 
+    # ---- Base 3 Engine Library Retrieval (PDI BASE_ENGINE 0x20) ----
+    # Record structure from PyTrain (base_req.py lines 315-349):
+    #   offset 11-43: road name (33 bytes ASCII, null-terminated)
+    #   offset 44-48: road number (5 bytes ASCII)
+    #   offset 49:    loco type (0=Diesel, 1=Steam, 2=Electric, 3=Subway, 8=Acela...)
+    #   offset 50:    control type
+    #   offset 51:    sound type
+    #   offset 63:    last train ID (consist assignment)
+    # Record is 0xC0 (192) bytes. Offsets below are from record_data (after
+    # stripping the 3-byte cmd+id+action header), so they are PyTrain offset - 3.
 
-class SerialTcpProxy:
+    def build_engine_read_request(self, engine_id: int) -> bytes:
+        """Build PDI request to read engine data from Base 3 library"""
+        ACTION_CONFIG = 0x03
+        payload = bytes([PdiCommand.BASE_ENGINE, engine_id, ACTION_CONFIG])
+        stuffed, checksum = self._calculate_checksum_and_stuff(payload)
+        return bytes([PDI_SOP]) + stuffed + checksum + bytes([PDI_EOP])
+
+    def query_engine_data_ser2(self, engine_id: int, timeout: float = 1.0) -> dict:
+        """Query Base 3 for engine library data via SER2 serial port
+
+        Returns dict with:
+        - tmcc_id: engine address
+        - road_name: engine road name (e.g. "Chesapeake & Ohio")
+        - road_number: engine road number (e.g. "48")
+        - loco_type: locomotive type byte
+        - control_type: control type byte
+        - sound_type: sound type byte
+        - last_train_id: consist assignment
+        - raw_data: full record bytes
+        Returns None if the slot is empty or the query fails.
+        """
+        with self.pdi_lock:
+            if not self.bridge.lionel_serial or not self.bridge.lionel_serial.is_open:
+                logger.debug("📡 PDI: Cannot query engine - serial not connected")
+                return None
+
+            try:
+                request = self.build_engine_read_request(engine_id)
+                logger.debug(f"📡 PDI SER2: Querying engine {engine_id}: {request.hex()}")
+
+                with self.bridge.lionel_lock:
+                    # Flush input buffer
+                    self.bridge.lionel_serial.reset_input_buffer()
+
+                    # Send PDI request via SER2
+                    self.bridge.lionel_serial.write(request)
+                    self.bridge.lionel_serial.flush()
+
+                    # Wait for response
+                    start_time = time.time()
+                    response_data = bytearray()
+                    in_packet = False
+
+                    while time.time() - start_time < timeout:
+                        if self.bridge.lionel_serial.in_waiting > 0:
+                            raw_bytes = self.bridge.lionel_serial.read(self.bridge.lionel_serial.in_waiting)
+
+                            # Also process consist commands that may be in this data
+                            self.bridge._process_consist_commands(raw_bytes)
+
+                            for b in raw_bytes:
+                                if b == PDI_SOP:
+                                    in_packet = True
+                                    response_data = bytearray()
+                                elif b == PDI_EOP and in_packet:
+                                    # Complete packet received
+                                    return self._parse_engine_response(response_data)
+                                elif in_packet:
+                                    response_data.append(b)
+                        else:
+                            time.sleep(0.01)
+
+                    return None  # Timeout - empty slot or no response
+
+            except Exception as e:
+                logger.debug(f"📡 PDI SER2 engine query error: {e}")
+                return None
+
+    def _parse_engine_response(self, data: bytes) -> dict:
+        """Parse PDI BASE_ENGINE response data into engine library record"""
+        try:
+            # Unstuff the data
+            unstuffed = self._unstuff_bytes(data)
+
+            if len(unstuffed) < 3:
+                return None
+
+            # Verify checksum
+            if not self._verify_checksum(unstuffed):
+                logger.debug(f"📡 PDI: Engine response checksum failed: {unstuffed.hex()}")
+                return None
+
+            # Skip header: cmd(1) + engine_id(1) + action(1) = 3 bytes, remove checksum
+            record_data = unstuffed[3:-1]
+
+            # Extract fields using PyTrain offsets (adjusted by -3 for header)
+            road_name = self._decode_text(record_data[8:41])    # PyTrain offset 11-43
+            road_number = self._decode_text(record_data[41:46]) # PyTrain offset 44-48
+
+            # If road_name is None, this is an empty slot
+            if road_name is None:
+                return None
+
+            result = {
+                'tmcc_id': unstuffed[1],
+                'road_name': road_name,
+                'road_number': road_number,
+                'loco_type': record_data[46] if len(record_data) > 46 else None,    # offset 49
+                'control_type': record_data[47] if len(record_data) > 47 else None,  # offset 50
+                'sound_type': record_data[48] if len(record_data) > 48 else None,    # offset 51
+                'last_train_id': record_data[60] if len(record_data) > 60 else None, # offset 63
+                'raw_data': record_data,
+            }
+
+            logger.info(f"🚂 Base 3 engine #{result['tmcc_id']}: {road_name} #{road_number or ''} (type={result['loco_type']})")
+            return result
+
+        except Exception as e:
+            logger.debug(f"📡 PDI engine parse error: {e}")
+            return None
+
+    @staticmethod
+    def _decode_text(data: bytes) -> str | None:
+        """Decode ASCII text from PDI record field (port of PyTrain's decode_text)
+
+        Reads ASCII bytes until null or end-of-field.
+        Returns None if the field is all 0xFF (empty slot).
+        """
+        name = ""
+        num_ffs = 0
+        for b in data:
+            if b == 0:
+                break
+            elif b == 0xFF:
+                num_ffs += 1
+            else:
+                name += chr(b)
+        if len(data) and num_ffs == len(data):
+            return None
+        return name if name else None
     """TCP proxy for sharing SER2 serial port with external applications like PyTrain.
     
     Listens on a TCP port and:
@@ -1462,6 +1621,163 @@ class SerialTcpProxy:
                     pass
 
 
+class StatusHTTPHandler(http.server.BaseHTTPRequestHandler):
+    """HTTP handler that serves bridge status as JSON for Home Assistant.
+
+    GET  /status  — returns connection state + engine rosters as JSON
+    POST /refresh — triggers a rescan of both WTIU and Base 3 engine libraries
+    """
+
+    def do_GET(self):
+        if self.path == '/status' or self.path == '/status/':
+            bridge = self.server.bridge
+
+            # Snapshot the engine data under the lock so we don't read
+            # while the discovery thread is modifying these structures.
+            with bridge.engine_data_lock:
+                # Load name overrides: {"mth": {"1": "Custom Name"}, "lionel": {"5": "Big Boy"}}
+                mth_overrides = bridge.engine_name_overrides.get('mth', {})
+                lionel_overrides = bridge.engine_name_overrides.get('lionel', {})
+
+                # Build MTH engine list from available engines + capabilities
+                mth_engines = []
+                for eng in sorted(bridge.available_mth_engines):
+                    caps = bridge.engine_capabilities.get(eng, {})
+                    polled_name = bridge.engine_names.get(str(eng), 'Unknown')
+                    # Use override if set, otherwise use polled name
+                    display_name = mth_overrides.get(str(eng), polled_name)
+                    mth_engines.append({
+                        'dcs_id': eng,
+                        'name': display_name,
+                        'polled_name': polled_name if display_name != polled_name else None,
+                        'type': caps.get('type', 0),
+                        'is_steam': caps.get('is_steam', False),
+                        'is_diesel': caps.get('is_diesel', False),
+                        'protowhistle': caps.get('protowhistle', False),
+                    })
+
+                # Build Lionel engine list from Base 3 library
+                lionel_engines = []
+                for tmcc_id in sorted(bridge.lionel_engine_library.keys()):
+                    info = bridge.lionel_engine_library[tmcc_id]
+                    polled_name = info.get('road_name', 'Unknown')
+                    # Use override if set, otherwise use polled name
+                    display_name = lionel_overrides.get(str(tmcc_id), polled_name)
+                    lionel_engines.append({
+                        'tmcc_id': tmcc_id,
+                        'road_name': display_name,
+                        'polled_name': polled_name if display_name != polled_name else None,
+                        'road_number': info.get('road_number'),
+                        'loco_type': info.get('loco_type'),
+                        'last_train_id': info.get('last_train_id'),
+                    })
+
+                # Snapshot connection state too
+                online = bridge.running
+                base3_connected = bridge.lionel_serial is not None and bridge.lionel_serial.is_open
+                wtiu_connected = bridge.mth_connected
+                wtiu_host = getattr(bridge, 'mth_host', 'unknown')
+                discovered_mappings = dict(bridge.discovered_mth_engines)
+                manual_mappings = dict(bridge.engine_mappings)
+
+            status = {
+                'online': online,
+                'base3_connected': base3_connected,
+                'wtiu_connected': wtiu_connected,
+                'wtiu_host': wtiu_host,
+                'lionel_engines': lionel_engines,
+                'mth_engines': mth_engines,
+                'engine_mappings': {
+                    'discovered': discovered_mappings,
+                    'manual': manual_mappings,
+                },
+            }
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(status, indent=2).encode())
+        else:
+            self.send_response(404)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'Not found'}).encode())
+
+    def do_POST(self):
+        if self.path == '/refresh' or self.path == '/refresh/':
+            bridge = self.server.bridge
+            # Run refresh in a background thread so we can respond immediately
+            threading.Thread(target=bridge.refresh_all_engines, daemon=True).start()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'status': 'refreshing'}).encode())
+        elif self.path == '/rename' or self.path == '/rename/':
+            bridge = self.server.bridge
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(content_length)
+                data = json.loads(body)
+
+                engine_type = data.get('type')  # "mth" or "lionel"
+                engine_id = str(data.get('id'))
+                new_name = data.get('name', '').strip()
+
+                if engine_type not in ('mth', 'lionel') or not engine_id:
+                    self.send_response(400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'error': 'Invalid type or id'}).encode())
+                    return
+
+                # Update the override in memory (under lock to avoid race with status reads)
+                with bridge.engine_data_lock:
+                    if 'engine_name_overrides' not in bridge.settings:
+                        bridge.settings['engine_name_overrides'] = {}
+                    if engine_type not in bridge.settings['engine_name_overrides']:
+                        bridge.settings['engine_name_overrides'][engine_type] = {}
+
+                    if new_name:
+                        # Set / update override
+                        bridge.settings['engine_name_overrides'][engine_type][engine_id] = new_name
+                        logger.info(f"✏️ Engine name override: {engine_type} #{engine_id} → '{new_name}'")
+                    else:
+                        # Empty name = remove override, revert to polled name
+                        bridge.settings['engine_name_overrides'][engine_type].pop(engine_id, None)
+                        logger.info(f"✏️ Engine name override removed: {engine_type} #{engine_id}")
+
+                    # Update the in-memory copy
+                    bridge.engine_name_overrides = bridge.settings['engine_name_overrides']
+
+                # Save to config file
+                bridge.config.save(bridge.settings)
+
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'status': 'ok', 'name': new_name or None}).encode())
+
+            except Exception as e:
+                logger.error(f"❌ Rename error: {e}")
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+        else:
+            self.send_response(404)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'Not found'}).encode())
+
+    def log_message(self, format, *args):
+        # Suppress default HTTP logging to avoid cluttering the log
+        pass
+
+
 class LionelMTHBridge:
     def __init__(self):
         # Load configuration
@@ -1533,12 +1849,16 @@ class LionelMTHBridge:
         
         # Engine mapping settings
         self.engine_mappings = self.settings.get('engine_mappings', {})
+        self.engine_name_overrides = self.settings.get('engine_name_overrides', {})
         self.auto_engine_mapping = mth_settings.get('auto_engine_mapping', True)
         self.discovered_mth_engines = {}  # {lionel_addr: mth_engine}
         self.available_mth_engines = []  # List of available MTH engine numbers
         self.engine_names = {}  # {mth_engine: name} - engine names from WTIU
         self._load_engine_mappings()  # Load persisted mappings
-        
+
+        # Base 3 engine library (populated by discover_base3_engines on startup/refresh)
+        self.lionel_engine_library = {}  # {tmcc_id: {road_name, road_number, loco_type, ...}}
+
         self.mth_devices = ['192.168.0.100', '192.168.0.102']
         self.lionel_serial = None
         self.mth_connected = False
@@ -1569,6 +1889,7 @@ class LionelMTHBridge:
         # Thread safety locks
         self.lionel_lock = Lock()
         self.mth_lock = Lock()
+        self.engine_data_lock = Lock()  # Protects engine lists/dicts from concurrent read/write
         
         # Speck encryption settings (Mark's RTCRemote - using his actual key)
         self.use_encryption = True  # Always use Speck encryption for MTH WTIU
@@ -2764,12 +3085,14 @@ class LionelMTHBridge:
                             logger.info(f"🔗 Auto-mapped Lionel #{lionel_addr} → MTH #{mth_engine}")
                 
                 # Merge available engines list (don't replace, add new ones)
-                for eng in new_available_engines:
-                    if eng not in self.available_mth_engines:
-                        self.available_mth_engines.append(eng)
-                
+                with self.engine_data_lock:
+                    for eng in new_available_engines:
+                        if eng not in self.available_mth_engines:
+                            self.available_mth_engines.append(eng)
+                    engines_to_query = list(self.available_mth_engines)
+
                 # Query capabilities for each engine (also gets engine names)
-                for dcs_engine in self.available_mth_engines:
+                for dcs_engine in engines_to_query:
                     self.query_engine_capabilities(dcs_engine)
                 
                 # Save mappings to disk
@@ -2786,17 +3109,18 @@ class LionelMTHBridge:
                         if "okay" in resp.lower():
                             lionel_addr = mth_engine - 1
                             # Merge with existing - add to available list
-                            if mth_engine not in self.available_mth_engines:
-                                self.available_mth_engines.append(mth_engine)
-                            # Update mapping if not manually configured
-                            if lionel_addr > 0 and str(lionel_addr) not in self.engine_mappings:
-                                existing = self.discovered_mth_engines.get(str(lionel_addr))
-                                if existing != mth_engine:
-                                    self.discovered_mth_engines[str(lionel_addr)] = mth_engine
-                                    if existing:
-                                        logger.info(f"🔗 Updated Lionel #{lionel_addr}: MTH #{existing} → MTH #{mth_engine}")
-                                    else:
-                                        logger.info(f"🔗 Auto-mapped Lionel #{lionel_addr} → MTH #{mth_engine}")
+                            with self.engine_data_lock:
+                                if mth_engine not in self.available_mth_engines:
+                                    self.available_mth_engines.append(mth_engine)
+                                # Update mapping if not manually configured
+                                if lionel_addr > 0 and str(lionel_addr) not in self.engine_mappings:
+                                    existing = self.discovered_mth_engines.get(str(lionel_addr))
+                                    if existing != mth_engine:
+                                        self.discovered_mth_engines[str(lionel_addr)] = mth_engine
+                                        if existing:
+                                            logger.info(f"🔗 Updated Lionel #{lionel_addr}: MTH #{existing} → MTH #{mth_engine}")
+                                        else:
+                                            logger.info(f"🔗 Auto-mapped Lionel #{lionel_addr} → MTH #{mth_engine}")
                             logger.info(f"🚂 Found engine {mth_engine} via fallback")
                     except:
                         continue
@@ -2875,17 +3199,18 @@ class LionelMTHBridge:
                             logger.info(f"🔍 Only {len(hex_bytes)} capability bytes, need {byte19_idx+1}")
                     
                     lionel_engine = dcs_engine - 1
-                    
-                    self.engine_capabilities[dcs_engine] = {
-                        'name': engine_name,
-                        'type': engine_type,
-                        'is_steam': is_steam,
-                        'is_diesel': is_diesel,
-                        'protowhistle': has_protowhistle
-                    }
-                    
-                    # Store engine name for display
-                    self.engine_names[str(dcs_engine)] = engine_name
+
+                    with self.engine_data_lock:
+                        self.engine_capabilities[dcs_engine] = {
+                            'name': engine_name,
+                            'type': engine_type,
+                            'is_steam': is_steam,
+                            'is_diesel': is_diesel,
+                            'protowhistle': has_protowhistle
+                        }
+
+                        # Store engine name for display
+                        self.engine_names[str(dcs_engine)] = engine_name
                     
                     self.protowhistle_capable[lionel_engine] = has_protowhistle
                     
@@ -2896,7 +3221,7 @@ class LionelMTHBridge:
         except Exception as e:
             logger.debug(f"⚠️ Failed to query capabilities for engine {dcs_engine}: {e}")
     
-    ENGINE_MAPPINGS_FILE = "engine_mappings.json"
+    ENGINE_MAPPINGS_FILE = os.path.join(os.path.expanduser("~/.lionel-mth-bridge"), "engine_mappings.json")
     
     def _load_engine_mappings(self):
         """Load persisted engine mappings from file"""
@@ -2927,6 +3252,94 @@ class LionelMTHBridge:
             logger.info(f"💾 Saved {len(self.discovered_mth_engines)} engine mappings to disk")
         except Exception as e:
             logger.error(f"❌ Could not save engine mappings: {e}")
+
+    def discover_base3_engines(self):
+        """Scan Base 3 engine library via PDI BASE_ENGINE (0x20) queries.
+
+        Scans all 99 engine slots and builds self.lionel_engine_library.
+        Runs in a background thread to avoid blocking the main listener.
+        The Base 3 library is static (changed only via Lionel app), so this
+        runs on startup and on HA refresh button click — not periodically.
+        """
+        # Wait for serial connection to come up (auto-reconnect may still be trying)
+        for _ in range(30):
+            if self.lionel_serial and self.lionel_serial.is_open:
+                break
+            time.sleep(1)
+        if not self.lionel_serial or not self.lionel_serial.is_open:
+            logger.warning("⚠️ Cannot scan Base 3 library - SER2 not connected")
+            return
+
+        logger.info("📚 Scanning Base 3 engine library (99 slots)...")
+        found = 0
+        new_library = {}
+        queries_ok = 0  # Count successful queries (even if slot was empty)
+        queries_failed = 0  # Count queries that errored (serial disconnected?)
+
+        for engine_id in range(1, 100):
+            result = self.pdi_client.query_engine_data_ser2(engine_id, timeout=0.5)
+            if result is None:
+                # None could mean "empty slot" (normal) or "query failed" (serial error)
+                # Check if serial is still open — if not, the remaining slots will all fail
+                if not self.lionel_serial or not self.lionel_serial.is_open:
+                    queries_failed += 1
+                    logger.warning(f"⚠️ Base 3 scan interrupted at slot {engine_id} - serial disconnected")
+                    break
+            else:
+                queries_ok += 1
+                if result.get('road_name'):
+                    new_library[engine_id] = {
+                        'road_name': result['road_name'],
+                        'road_number': result.get('road_number'),
+                        'loco_type': result.get('loco_type'),
+                        'control_type': result.get('control_type'),
+                        'sound_type': result.get('sound_type'),
+                        'last_train_id': result.get('last_train_id'),
+                    }
+                    found += 1
+
+        # Only replace the library if we got through the scan without a serial disconnect.
+        # If the serial dropped mid-scan, keep the old library so HA still shows valid data.
+        if queries_failed > 0 and found == 0 and self.lionel_engine_library:
+            logger.warning("⚠️ Base 3 scan failed completely - keeping previous library data")
+        elif queries_failed > 0 and found > 0:
+            # Partial scan — merge new findings into existing library
+            with self.engine_data_lock:
+                merged = dict(self.lionel_engine_library)
+                merged.update(new_library)
+                self.lionel_engine_library = merged
+            logger.info(f"📚 Base 3 library scan partial: {found} engines found, {queries_failed} slots skipped (serial disconnected)")
+        else:
+            with self.engine_data_lock:
+                self.lionel_engine_library = new_library
+            logger.info(f"📚 Base 3 library scan complete: {found} engines found")
+        for eid, info in sorted(new_library.items()):
+            logger.info(f"   Lionel #{eid}: {info['road_name']} #{info.get('road_number') or ''}")
+
+    def refresh_all_engines(self):
+        """Refresh both WTIU and Base 3 engine libraries.
+
+        Triggered by the HA refresh button (POST /refresh endpoint).
+        Runs both scans in sequence in the calling thread (which is a
+        background thread spawned by the HTTP handler).
+        """
+        # Prevent overlapping refresh with the 60-second periodic discovery
+        if hasattr(self, '_refresh_in_progress') and self._refresh_in_progress:
+            logger.info("🔄 Refresh already in progress, skipping")
+            return
+        self._refresh_in_progress = True
+        logger.info("🔄 Manual engine refresh triggered")
+        try:
+            if self.mth_connected:
+                self.discover_mth_engines()
+        except Exception as e:
+            logger.error(f"❌ WTIU refresh error: {e}")
+        try:
+            self.discover_base3_engines()
+        except Exception as e:
+            logger.error(f"❌ Base 3 refresh error: {e}")
+        logger.info("🔄 Engine refresh complete")
+        self._refresh_in_progress = False
     
     def get_mth_engine(self, lionel_address):
         """Get MTH engine number for Lionel address
@@ -5043,7 +5456,25 @@ class LionelMTHBridge:
         # Start TCP serial proxy for PyTrain and other apps
         if self.serial_tcp_proxy:
             self.serial_tcp_proxy.start()
-        
+
+        # Start HTTP status endpoint for Home Assistant
+        ha_settings = self.settings.get('ha_status', {})
+        if ha_settings.get('enabled', False):
+            ha_port = ha_settings.get('port', 8580)
+            try:
+                self.status_server = http.server.HTTPServer(
+                    ('0.0.0.0', ha_port),
+                    StatusHTTPHandler
+                )
+                self.status_server.bridge = self
+                threading.Thread(target=self.status_server.serve_forever, daemon=True).start()
+                logger.info(f"📊 HA status endpoint started on port {ha_port}")
+            except Exception as e:
+                logger.error(f"❌ Could not start HA status endpoint: {e}")
+
+        # Scan Base 3 engine library on startup (in background thread)
+        threading.Thread(target=self.discover_base3_engines, daemon=True).start()
+
         return True
     
     def start_periodic_engine_discovery(self):

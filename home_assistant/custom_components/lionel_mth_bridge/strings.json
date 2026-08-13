@@ -1,0 +1,20 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Lionel MTH Bridge",
+                "description": "Enter the IP address and port of your O-Gauge Command Control Bridge.",
+                "data": {
+                    "host": "Bridge IP Address",
+                    "port": "Port"
+                }
+            }
+        },
+        "error": {
+            "cannot_connect": "Cannot connect to the bridge at {host}:{port}. Make sure the bridge is running and the IP address is correct."
+        },
+        "abort": {
+            "already_configured": "This bridge is already configured."
+        }
+    }
+}
