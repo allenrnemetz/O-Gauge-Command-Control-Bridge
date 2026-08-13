@@ -64,7 +64,7 @@
 
   Open the extracted folder. Look for the file called:
 
-     Install-Bridge.sh
+     Install Bridge.sh
 
   Double-click it. If a small dialog pops up asking what to
   do, click "Run" or "Run in Terminal".
@@ -131,10 +131,10 @@
   When a new version comes out, updating is easy:
 
   1. Find the folder where you originally installed the
-     bridge (the one with "Install-Bridge.sh" and
-     "Update-Bridge.sh" in it).
+     bridge (the one with "Install Bridge.sh" and
+     "Update Bridge.sh" in it).
 
-  2. Double-click "Update-Bridge.sh".
+  2. Double-click "Update Bridge.sh".
 
      If a small dialog pops up asking what to do, click
      "Run" or "Run in Terminal".
