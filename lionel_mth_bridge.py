@@ -1937,6 +1937,7 @@ class LionelMTHBridge:
         self.discovered_mth_engines = {}  # {lionel_addr: mth_engine}
         self.available_mth_engines = []  # List of available MTH engine numbers
         self.engine_names = {}  # {mth_engine: name} - engine names from WTIU
+        self.engine_capabilities = {}  # {dcs_engine: {speed, sound, etc}} - capabilities from WTIU
         self._load_engine_mappings()  # Load persisted mappings
 
         # Base 3 engine library (populated by discover_base3_engines on startup/refresh)
