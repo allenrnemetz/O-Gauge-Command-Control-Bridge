@@ -62,7 +62,7 @@
   STEP 3: RUN THE INSTALLER
 ------------------------------------------------------------
 
-  Open the extracted folder. You should see a file called:
+  Open the extracted folder. Look for the file called:
 
      Install-Bridge.sh
 

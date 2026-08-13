@@ -116,7 +116,7 @@ if [ "$CURRENT_DIR" != "$INSTALL_DIR" ]; then
     # Copy all bridge files to the install directory
     # (rsync would be cleaner but may not be installed; use cp)
     for f in lionel_mth_bridge.py tmcc_wled.py install.sh gui_install.sh gui_update.sh \
-             "Install Bridge.desktop" "Update Bridge.desktop" "START HERE.txt" \
+             "START HERE.txt" \
              Install-Bridge.sh Update-Bridge.sh setup.sh \
              README.md LICENSE bridge_config.json .gitignore .gitattributes; do
         if [ -f "$CURRENT_DIR/$f" ]; then
@@ -124,20 +124,39 @@ if [ "$CURRENT_DIR" != "$INSTALL_DIR" ]; then
         fi
     done
 
-    # Fix permissions on .sh and .desktop files so double-click works
+    # Fix permissions on .sh files so double-click works
     chmod +x "$INSTALL_DIR"/*.sh 2>/dev/null || true
-    chmod +x "$INSTALL_DIR"/*.desktop 2>/dev/null || true
-    for df in "$INSTALL_DIR"/*.desktop; do
-        [ -f "$df" ] && gio set "$df" metadata::trusted true 2>/dev/null || true
-    done
 
-    # Copy launcher icons to the user's Desktop and mark them trusted
+    # Create .desktop launcher icons on the user's Desktop and mark them trusted
+    # These are generated here (not shipped in the archive) because .desktop files
+    # require a metadata::trusted attribute that can't be included in a tar.gz/zip.
+    cat > "$HOME/Desktop/Update Bridge.desktop" << 'DESKTOPEOF'
+[Desktop Entry]
+Type=Application
+Name=Update Bridge
+Comment=Update the Lionel-MTH Command Control Bridge to the latest version
+Exec=bash -c 'cd "$HOME/lionel-mth-bridge" && bash gui_update.sh'
+Icon=system-software-update
+Terminal=false
+Categories=Utility;System;
+StartupNotify=true
+DESKTOPEOF
+
+    cat > "$HOME/Desktop/Install Bridge.desktop" << 'DESKTOPEOF'
+[Desktop Entry]
+Type=Application
+Name=Install Bridge
+Comment=Install the Lionel-MTH Command Control Bridge
+Exec=bash -c 'cd "$HOME/lionel-mth-bridge" && bash gui_install.sh'
+Icon=system-software-install
+Terminal=false
+Categories=Utility;System;
+StartupNotify=true
+DESKTOPEOF
+
     for df in "Install Bridge.desktop" "Update Bridge.desktop"; do
-        if [ -f "$INSTALL_DIR/$df" ]; then
-            cp "$INSTALL_DIR/$df" "$HOME/Desktop/" 2>/dev/null || true
-            chmod +x "$HOME/Desktop/$df" 2>/dev/null || true
-            gio set "$HOME/Desktop/$df" metadata::trusted true 2>/dev/null || true
-        fi
+        chmod +x "$HOME/Desktop/$df" 2>/dev/null || true
+        gio set "$HOME/Desktop/$df" metadata::trusted true 2>/dev/null || true
     done
 
     # Copy the home_assistant directory if it exists
