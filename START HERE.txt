@@ -64,15 +64,10 @@
 
   Open the extracted folder. You should see a file called:
 
-     Install Bridge
+     Install-Bridge.sh
 
-  It has a software/install icon (a box with a green arrow
-  or similar).
-
-  Double-click "Install Bridge".
-
-  If a dialog asks "Do you want to allow launching?",
-  click "Yes" or "Allow". This is a one-time security prompt.
+  Double-click it. If a small dialog pops up asking what to
+  do, click "Run" or "Run in Terminal".
 
   A window will pop up guiding you through the installation.
   Just click OK / answer the questions and click OK.
@@ -86,19 +81,11 @@
   IF DOUBLE-CLICK DOESN'T WORK
 ------------------------------------------------------------
 
-  Some systems may still need permission. Try:
-
-  Option A: Right-click "Install Bridge" and look for:
-     - "Allow launching" or
-     - "Properties" -> "Permissions" -> check "Allow executing
-       file as program"
-     Then double-click it again.
-
-  Option B: Open a terminal in this folder and type:
+  Open a terminal in this folder and type:
 
      bash gui_install.sh
 
-     then press Enter.
+  then press Enter.
 
 
 ------------------------------------------------------------
@@ -144,13 +131,13 @@
   When a new version comes out, updating is easy:
 
   1. Find the folder where you originally installed the
-     bridge (the one with "Install Bridge" and "Update
-     Bridge" in it).
+     bridge (the one with "Install-Bridge.sh" and
+     "Update-Bridge.sh" in it).
 
-  2. Double-click "Update Bridge".
+  2. Double-click "Update-Bridge.sh".
 
-     If a dialog asks "Do you want to allow launching?",
-     click "Yes" or "Allow".
+     If a small dialog pops up asking what to do, click
+     "Run" or "Run in Terminal".
 
   3. That's it! The updater will:
      - Download the latest version from GitHub

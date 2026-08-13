@@ -117,18 +117,27 @@ if [ "$CURRENT_DIR" != "$INSTALL_DIR" ]; then
     # (rsync would be cleaner but may not be installed; use cp)
     for f in lionel_mth_bridge.py tmcc_wled.py install.sh gui_install.sh gui_update.sh \
              "Install Bridge.desktop" "Update Bridge.desktop" "START HERE.txt" \
-             setup.sh \
+             Install-Bridge.sh Update-Bridge.sh setup.sh \
              README.md LICENSE bridge_config.json .gitignore .gitattributes; do
         if [ -f "$CURRENT_DIR/$f" ]; then
             cp "$CURRENT_DIR/$f" "$INSTALL_DIR/" 2>/dev/null || true
         fi
     done
 
-    # Fix permissions on .desktop and .sh files so double-click works
+    # Fix permissions on .sh and .desktop files so double-click works
     chmod +x "$INSTALL_DIR"/*.sh 2>/dev/null || true
     chmod +x "$INSTALL_DIR"/*.desktop 2>/dev/null || true
     for df in "$INSTALL_DIR"/*.desktop; do
         [ -f "$df" ] && gio set "$df" metadata::trusted true 2>/dev/null || true
+    done
+
+    # Copy launcher icons to the user's Desktop and mark them trusted
+    for df in "Install Bridge.desktop" "Update Bridge.desktop"; do
+        if [ -f "$INSTALL_DIR/$df" ]; then
+            cp "$INSTALL_DIR/$df" "$HOME/Desktop/" 2>/dev/null || true
+            chmod +x "$HOME/Desktop/$df" 2>/dev/null || true
+            gio set "$HOME/Desktop/$df" metadata::trusted true 2>/dev/null || true
+        fi
     done
 
     # Copy the home_assistant directory if it exists
