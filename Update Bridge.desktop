@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Update Bridge
+Name[en_US]=Update Bridge
+Comment=Update the Lionel-MTH Command Control Bridge to the latest version
+Comment[en_US]=Update the Lionel-MTH Command Control Bridge to the latest version
+Exec=bash -c 'cd "$(dirname "%k")" && bash gui_update.sh'
+Icon=system-software-update
+Terminal=false
+Categories=Utility;System;
+StartupNotify=true

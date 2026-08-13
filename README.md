@@ -371,7 +371,24 @@ Set `enabled` to `false` to disable the proxy if not needed.
 
 ## Updating the Bridge
 
-Run the updater script on the Pi to pull the latest code, refresh dependencies, and restart the service:
+There are two ways to update, depending on how you installed:
+
+### Easy Update (GUI, for desktop installer users)
+
+If you installed via the Easy Desktop Install method, just double-click **Update Bridge** in the same folder where you originally installed. The updater will:
+
+- Download the latest release from GitHub automatically (no manual download needed)
+- Replace the bridge files (your configuration is preserved)
+- Refresh Python dependencies
+- Restart the bridge service
+
+You may be asked for your password — this is needed to restart the service.
+
+> **If double-click doesn't work:** Right-click "Update Bridge" → "Allow launching" (or Properties → Permissions → allow executing). Alternatively, open a terminal in the folder and run `bash gui_update.sh`.
+
+### Manual Update (terminal, for SSH/git users)
+
+If you installed via the manual method (git clone), run the updater script to pull the latest code, refresh dependencies, and restart the service:
 
 ```bash
 cd ~/lionel-mth-bridge

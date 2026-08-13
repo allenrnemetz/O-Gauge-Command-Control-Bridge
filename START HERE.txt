@@ -131,6 +131,30 @@
 
 
 ------------------------------------------------------------
+  UPDATING THE BRIDGE LATER
+------------------------------------------------------------
+
+  When a new version comes out, updating is easy:
+
+  1. Find the folder where you originally installed the
+     bridge (the one with "Install Bridge" and "Update
+     Bridge" in it).
+
+  2. Double-click "Update Bridge".
+
+  3. That's it! The updater will:
+     • Download the latest version from GitHub
+     • Replace the bridge files (your settings are kept)
+     • Restart the bridge
+
+  You don't need to download anything yourself — the
+  updater fetches the latest release automatically.
+
+  You may be asked for your password during the update.
+  This is normal (it's needed to restart the service).
+
+
+------------------------------------------------------------
   NEED HELP?
 ------------------------------------------------------------
 
