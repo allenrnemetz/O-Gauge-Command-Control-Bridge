@@ -33,19 +33,23 @@
 
   Scroll down to the "Assets" section and click:
 
-     Source code (zip)
+     Source code (tar.gz)
 
-  This downloads a ZIP file to your Downloads folder.
+  IMPORTANT: Download the tar.gz version, NOT the zip version.
+  The tar.gz version keeps the file permissions that make the
+  installer icons work on double-click. The zip version does not.
+
+  This downloads a file to your Downloads folder.
 
 
 ------------------------------------------------------------
-  STEP 2: EXTRACT THE ZIP
+  STEP 2: EXTRACT THE DOWNLOAD
 ------------------------------------------------------------
 
-  Find the downloaded ZIP file (usually in your Downloads
+  Find the downloaded file (usually in your Downloads
   folder). It will be named something like:
 
-     O-Gauge-Command-Control-Bridge-on-Pi-1.3.0.zip
+     O-Gauge-Command-Control-Bridge-on-Pi-1.4.1.tar.gz
 
   Right-click it and choose:
 
@@ -55,31 +59,20 @@
 
 
 ------------------------------------------------------------
-  STEP 3: MAKE THE INSTALLER CLICKABLE (ONE-TIME)
+  STEP 3: RUN THE INSTALLER
 ------------------------------------------------------------
 
-  Open the extracted folder. Right-click anywhere in the
-  folder and choose:
-
-     "Open Terminal Here"  (or "Open in Terminal")
-
-  In the terminal window, type:
-
-     bash setup.sh
-
-  and press Enter. This makes the installer and updater
-  icons clickable. You only need to do this once.
-
-  (You can close the terminal after it says "Done!")
-
-
-------------------------------------------------------------
-  STEP 4: RUN THE INSTALLER
-------------------------------------------------------------
-
-  In the same folder, double-click:
+  Open the extracted folder. You should see a file called:
 
      Install Bridge
+
+  It has a software/install icon (a box with a green arrow
+  or similar).
+
+  Double-click "Install Bridge".
+
+  If a dialog asks "Do you want to allow launching?",
+  click "Yes" or "Allow". This is a one-time security prompt.
 
   A window will pop up guiding you through the installation.
   Just click OK / answer the questions and click OK.
@@ -90,7 +83,7 @@
 
 
 ------------------------------------------------------------
-  IF DOUBLE-CLICK STILL DOESN'T WORK
+  IF DOUBLE-CLICK DOESN'T WORK
 ------------------------------------------------------------
 
   Some systems may still need permission. Try:
@@ -109,7 +102,7 @@
 
 
 ------------------------------------------------------------
-  STEP 5: CHECK IT'S WORKING
+  STEP 4: CHECK IT'S WORKING
 ------------------------------------------------------------
 
   After the installer finishes, it will tell you it's done.
@@ -128,7 +121,7 @@
 
 
 ------------------------------------------------------------
-  STEP 6: ADD YOUR ENGINES (ONE-TIME SETUP)
+  STEP 5: ADD YOUR ENGINES (ONE-TIME SETUP)
 ------------------------------------------------------------
 
   Before you can control trains, you need to add your MTH
@@ -156,12 +149,15 @@
 
   2. Double-click "Update Bridge".
 
-  3. That's it! The updater will:
-     • Download the latest version from GitHub
-     • Replace the bridge files (your settings are kept)
-     • Restart the bridge
+     If a dialog asks "Do you want to allow launching?",
+     click "Yes" or "Allow".
 
-  You don't need to download anything yourself — the
+  3. That's it! The updater will:
+     - Download the latest version from GitHub
+     - Replace the bridge files (your settings are kept)
+     - Restart the bridge
+
+  You don't need to download anything yourself - the
   updater fetches the latest release automatically.
 
   You may be asked for your password during the update.
