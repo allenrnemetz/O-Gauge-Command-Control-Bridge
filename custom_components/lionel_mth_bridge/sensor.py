@@ -118,8 +118,15 @@ def _async_add_engine_sensors(
         dcs_id = eng.get("dcs_id")
         if dcs_id is not None and dcs_id not in coordinator._known_mth_ids:
             coordinator._known_mth_ids.add(dcs_id)
+            # Look up Lionel TMCC address from discovered mappings
+            lionel_id = None
+            discovered = data.get("engine_mappings", {}).get("discovered", {})
+            for lionel_addr, mth_dcs in discovered.items():
+                if mth_dcs == dcs_id:
+                    lionel_id = int(lionel_addr)
+                    break
             entities.append(
-                MthEngineSensor(coordinator, device_info, dcs_id)
+                MthEngineSensor(coordinator, device_info, dcs_id, lionel_id)
             )
 
     if entities:
@@ -331,13 +338,20 @@ class MthEngineSensor(CoordinatorEntity, SensorEntity):
         coordinator: LionelMthBridgeCoordinator,
         device_info: DeviceInfo,
         dcs_id: int,
+        lionel_id: int | None = None,
     ) -> None:
         super().__init__(coordinator)
         self._dcs_id = dcs_id
+        self._lionel_id = lionel_id
         self._attr_unique_id = (
             f"{coordinator.host}:{coordinator.port}_mth_engine_{dcs_id}"
         )
-        self._attr_name = f"MTH Engine #{dcs_id}"
+        # Use Lionel TMCC address in the name if known (that's what the user
+        # uses on their Cab remote), otherwise fall back to DCS ID
+        if lionel_id is not None:
+            self._attr_name = f"MTH Engine #{lionel_id}"
+        else:
+            self._attr_name = f"MTH Engine #{dcs_id}"
         self._attr_device_info = device_info
         self._attr_icon = "mdi:train"
 
@@ -365,6 +379,7 @@ class MthEngineSensor(CoordinatorEntity, SensorEntity):
         loco_type = eng.get("type", 0)
         attrs = {
             "dcs_id": self._dcs_id,
+            "lionel_id": self._lionel_id,
             "name": eng.get("name"),
             "type": loco_type,
             "is_steam": eng.get("is_steam", False),
