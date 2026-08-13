@@ -5604,8 +5604,12 @@ class LionelMTHBridge:
             except Exception as e:
                 logger.error(f"❌ Could not start HA status endpoint: {e}")
 
-        # Scan Base 3 engine library on startup (in background thread)
-        threading.Thread(target=self.discover_base3_engines, daemon=True).start()
+        # Base 3 engine library scan is NOT run on startup.
+        # Sending PDI queries to the Base 3 via SER2 can disrupt TMCC
+        # packet broadcasting. Scan only when the user explicitly requests
+        # it via the HA refresh button (POST /refresh endpoint).
+        # The listener thread (started above) just listens for TMCC data,
+        # exactly like v1.3 did.
 
         return True
     
