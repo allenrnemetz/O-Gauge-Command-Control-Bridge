@@ -1,4 +1,4 @@
-# <img src="docs/readme-icon.png" width="48" style="vertical-align: middle;"> O Gauge Command Control Bridge
+# <img src="docs/readme-icon.png" width="64" style="vertical-align: middle;"> O Gauge Command Control Bridge
 
 **Control MTH DCS trains using your Lionel Cab-1L, Cab-2, or Cab-3 remote**
 
