@@ -2,7 +2,7 @@
 
 Monitor your O-Gauge Command Control Bridge from Home Assistant. See connection status and engine libraries from both the Lionel Base 3 and MTH WTIU, all in your HA dashboard.
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?repository=lionel_mth_bridge&owner=allenrnemetz)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?repository=O-Gauge-Command-Control-Bridge-on-Pi&owner=allenrnemetz)
 
 [![Add integration to Home Assistant](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start?domain=lionel_mth_bridge)
 
