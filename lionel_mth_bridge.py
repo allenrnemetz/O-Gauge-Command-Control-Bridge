@@ -1476,6 +1476,9 @@ class PdiClient:
         if len(data) and num_ffs == len(data):
             return None
         return name if name else None
+
+
+class SerialTcpProxyLegacy:
     """TCP proxy for sharing SER2 serial port with external applications like PyTrain.
     
     Listens on a TCP port and:
