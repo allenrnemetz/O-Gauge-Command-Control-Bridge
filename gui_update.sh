@@ -190,7 +190,7 @@ LOG_FILE="/tmp/lionel_mth_bridge_update_$$.log"
                    'START HERE.txt'
                    'Install (Easy Method).sh' 'Update (Easy Method).sh' setup.sh
                    README.md LICENSE lionel-mth-bridge.service .gitignore .gitattributes
-                   hacs.json"
+                   hacs.json requirements.txt"
 
     for f in $FILES_TO_COPY; do
         if [ -f "$EXTRACTED_DIR/$f" ]; then
@@ -254,6 +254,40 @@ DESKTOPEOF
         pip install --upgrade pyserial zeroconf 2>&1 || true
     else
         echo "WARNING: venv not found at $INSTALL_DIR/venv — skipping dependency refresh" >&2
+    fi
+
+    echo "# Migrating WTIU config to mDNS auto-discovery..." >&2
+    # Migrate old hardcoded WTIU host/port to auto-discovery (v1.5.5+)
+    # The WTIU picks a random port on each boot, so hardcoding always breaks
+    CONFIG_FILE="$HOME/.lionel-mth-bridge/bridge_config.json"
+    if [ -f "$CONFIG_FILE" ]; then
+        python3 -c "
+import json
+config_path = '$CONFIG_FILE'
+with open(config_path, 'r') as f:
+    config = json.load(f)
+migrated = False
+if config.get('mth_host', 'auto') != 'auto':
+    config['mth_host'] = 'auto'
+    migrated = True
+if config.get('mth_port', 'auto') != 'auto':
+    config['mth_port'] = 'auto'
+    migrated = True
+if 'connection_settings' not in config:
+    config['connection_settings'] = {}
+if config['connection_settings'].get('mdns_discovery') is not True:
+    config['connection_settings']['mdns_discovery'] = True
+    migrated = True
+if config['connection_settings'].get('default_port') != 'auto':
+    config['connection_settings']['default_port'] = 'auto'
+    migrated = True
+if migrated:
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=4)
+    print('MIGRATED: WTIU config updated to mDNS auto-discovery')
+else:
+    print('OK: WTIU already using auto-discovery')
+" 2>&1 || true
     fi
 
     echo "# Setting up log cleanup..." >&2
