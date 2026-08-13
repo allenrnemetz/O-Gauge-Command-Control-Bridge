@@ -55,17 +55,31 @@
 
 
 ------------------------------------------------------------
-  STEP 3: RUN THE INSTALLER
+  STEP 3: MAKE THE INSTALLER CLICKABLE (ONE-TIME)
 ------------------------------------------------------------
 
-  Open the extracted folder. You should see a file called:
+  Open the extracted folder. Right-click anywhere in the
+  folder and choose:
+
+     "Open Terminal Here"  (or "Open in Terminal")
+
+  In the terminal window, type:
+
+     bash setup.sh
+
+  and press Enter. This makes the installer and updater
+  icons clickable. You only need to do this once.
+
+  (You can close the terminal after it says "Done!")
+
+
+------------------------------------------------------------
+  STEP 4: RUN THE INSTALLER
+------------------------------------------------------------
+
+  In the same folder, double-click:
 
      Install Bridge
-
-  It has a software/install icon (a box with a green arrow
-  or similar).
-
-  Double-click "Install Bridge".
 
   A window will pop up guiding you through the installation.
   Just click OK / answer the questions and click OK.
@@ -76,10 +90,10 @@
 
 
 ------------------------------------------------------------
-  IF DOUBLE-CLICK DOESN'T WORK
+  IF DOUBLE-CLICK STILL DOESN'T WORK
 ------------------------------------------------------------
 
-  Some systems need you to "allow" the file to run first.
+  Some systems may still need permission. Try:
 
   Option A: Right-click "Install Bridge" and look for:
      - "Allow launching" or
@@ -95,7 +109,7 @@
 
 
 ------------------------------------------------------------
-  STEP 4: CHECK IT'S WORKING
+  STEP 5: CHECK IT'S WORKING
 ------------------------------------------------------------
 
   After the installer finishes, it will tell you it's done.
@@ -114,7 +128,7 @@
 
 
 ------------------------------------------------------------
-  STEP 5: ADD YOUR ENGINES (ONE-TIME SETUP)
+  STEP 6: ADD YOUR ENGINES (ONE-TIME SETUP)
 ------------------------------------------------------------
 
   Before you can control trains, you need to add your MTH
