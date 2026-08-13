@@ -1231,26 +1231,60 @@ class Base3WiFiClient:
             self.connected = False
             return False
 
-    def recv_pdi(self, timeout=2.0) -> bytes | None:
+    def recv_pdi(self, timeout=2.0, expected_cmd=None) -> bytes | None:
         """Receive a PDI response. The Base 3 sends hex-encoded ASCII.
+        If expected_cmd is given (e.g. PdiCommand.BASE_MEMORY), skips
+        keepalive and other packets until a matching one is found.
         Returns raw bytes (decoded from hex ASCII) or None on timeout."""
         if not self.socket or not self.connected:
             return None
-        try:
-            self.socket.settimeout(timeout)
-            with self.lock:
-                data = self.socket.recv(4096)
-            if not data:
+        deadline = time.time() + timeout
+        buffer = ""
+        while time.time() < deadline:
+            try:
+                self.socket.settimeout(max(0.1, deadline - time.time()))
+                with self.lock:
+                    data = self.socket.recv(4096)
+                if not data:
+                    return None
+                buffer += data.decode('ascii', errors='ignore')
+                # Parse complete packets from the buffer
+                while True:
+                    # Find SOP (D1) and EOP (DF) in the hex string
+                    sop_pos = buffer.find('D1')
+                    if sop_pos < 0:
+                        buffer = ""
+                        break
+                    eop_pos = buffer.find('DF', sop_pos)
+                    if eop_pos < 0:
+                        # Incomplete packet, keep buffer from SOP
+                        buffer = buffer[sop_pos:]
+                        break
+                    # Extract one packet (SOP...EOP inclusive, 2 chars each)
+                    hex_packet = buffer[sop_pos:eop_pos + 2]
+                    remaining = buffer[eop_pos + 2:]
+                    buffer = remaining
+                    try:
+                        raw = bytes.fromhex(hex_packet)
+                    except ValueError:
+                        continue  # Not valid hex, skip
+                    # Check if this is the packet we want
+                    if expected_cmd is not None and len(raw) >= 2:
+                        if raw[1] == expected_cmd:
+                            return raw
+                        # Otherwise it's a keepalive or other packet; skip it
+                        logger.debug(f"📡 Base 3 WiFi: skipping non-matching packet (cmd=0x{raw[1]:02X})")
+                    else:
+                        return raw
+            except socket.timeout:
+                if buffer:
+                    # Try to parse what we have
+                    continue
                 return None
-            # Base 3 sends hex-encoded ASCII; decode to raw bytes
-            hex_str = data.decode('ascii', errors='ignore').strip()
-            # May contain multiple packets; take the first complete one
-            return bytes.fromhex(hex_str)
-        except socket.timeout:
-            return None
-        except Exception as e:
-            logger.debug(f"📡 Base 3 WiFi recv error: {e}")
-            return None
+            except Exception as e:
+                logger.debug(f"📡 Base 3 WiFi recv error: {e}")
+                return None
+        return None
 
     def query_engine(self, engine_id: int, timeout=2.0) -> dict | None:
         """Query a single engine record from the Base 3 via WiFi PDI BASE_MEMORY."""
@@ -1276,7 +1310,8 @@ class Base3WiFiClient:
         if not self.send_pdi(packet):
             return None
 
-        response = self.recv_pdi(timeout)
+        # Wait for BASE_MEMORY response (skip keepalive and other packets)
+        response = self.recv_pdi(timeout, expected_cmd=PdiCommand.BASE_MEMORY)
         if not response:
             return None
 
@@ -3700,6 +3735,7 @@ class LionelMTHBridge:
 
         for engine_id in range(1, 100):
             result = self.base3_wifi.query_engine(engine_id, timeout=2.0)
+            time.sleep(0.05)  # Small delay to avoid overwhelming the Base 3
             if result:
                 new_library[engine_id] = {
                     'road_name': result.get('road_name'),
