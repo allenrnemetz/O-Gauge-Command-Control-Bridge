@@ -164,6 +164,11 @@ DESKTOPEOF
         cp -r "$CURRENT_DIR/home_assistant" "$INSTALL_DIR/" 2>/dev/null || true
     fi
 
+    # Copy custom_components directory for HACS if it exists
+    if [ -d "$CURRENT_DIR/custom_components" ]; then
+        cp -r "$CURRENT_DIR/custom_components" "$INSTALL_DIR/" 2>/dev/null || true
+    fi
+
     # Copy hacs.json if it exists
     if [ -f "$CURRENT_DIR/hacs.json" ]; then
         cp "$CURRENT_DIR/hacs.json" "$INSTALL_DIR/" 2>/dev/null || true

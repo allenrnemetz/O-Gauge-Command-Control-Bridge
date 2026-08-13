@@ -237,6 +237,12 @@ DESKTOPEOF
         cp -r "$EXTRACTED_DIR/home_assistant" "$INSTALL_DIR/" 2>/dev/null || true
     fi
 
+    # Copy custom_components directory for HACS if it exists
+    if [ -d "$EXTRACTED_DIR/custom_components" ]; then
+        rm -rf "$INSTALL_DIR/custom_components" 2>/dev/null || true
+        cp -r "$EXTRACTED_DIR/custom_components" "$INSTALL_DIR/" 2>/dev/null || true
+    fi
+
     # Don't overwrite the user's bridge_config.json in the install dir —
     # the real config lives in ~/.lionel-mth-bridge/bridge_config.json
     # which is never touched by the update.
