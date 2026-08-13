@@ -186,8 +186,8 @@ class Config:
                 "use_encryption": True,
                 "simplified_handshake_first": True,
                 "mdns_discovery": True,
-                "fallback_hosts": ["192.168.0.31:33069", "192.168.0.100:33069", "192.168.0.102:33069"],
-                "default_port": 33069,
+                "fallback_hosts": [],
+                "default_port": 46311,
                 "auto_engine_mapping": True
             },
             "queue_settings": {
@@ -1938,6 +1938,7 @@ class LionelMTHBridge:
         self.available_mth_engines = []  # List of available MTH engine numbers
         self.engine_names = {}  # {mth_engine: name} - engine names from WTIU
         self.engine_capabilities = {}  # {dcs_engine: {speed, sound, etc}} - capabilities from WTIU
+        self.engine_capabilities = {}  # {dcs_engine: {speed, sound, etc}} - capabilities from WTIU
         self._load_engine_mappings()  # Load persisted mappings
 
         # Base 3 engine library (populated by discover_base3_engines on startup/refresh)
@@ -3495,33 +3496,60 @@ class LionelMTHBridge:
     def discover_wtiu_mdns(self):
         """Discover MTH WTIU using mDNS/Zeroconf"""
         try:
-            from zeroconf import ServiceBrowser, Zeroconf
+            from zeroconf import ServiceBrowser, Zeroconf, ServiceInfo
             logger.info("🔍 Discovering MTH WTIU via mDNS...")
-            
+
             class WTIUListener:
                 def __init__(self, bridge):
                     self.bridge = bridge
-                
+
                 def add_service(self, zeroconf, service_type, name):
-                    info = zeroconf.get_service_info(service_type, name)
+                    try:
+                        info = zeroconf.get_service_info(service_type, name, timeout=3000)
+                    except Exception:
+                        # Some WTIU firmware advertises service names with spaces
+                        # which zeroconf rejects. Try to parse the info manually.
+                        try:
+                            # Extract the actual service type from the name
+                            # e.g. "MTH TIU on mthdcs-FAE0 wtiu._mth-dcs._tcp.local."
+                            # -> service_type = "_mth-dcs._tcp.local."
+                            parts = name.split('.')
+                            for i, p in enumerate(parts):
+                                if p.startswith('_') and p.endswith('-dcs'):
+                                    st = '.'.join(parts[i:]) if i < len(parts) - 1 else service_type
+                                    break
+                            else:
+                                st = service_type
+                            info = ServiceInfo(type_=st, name=name)
+                            # Try reading from the zeroconf cache
+                            entries = zeroconf.cache.get_all_by_name(name)
+                            if entries:
+                                for entry in entries:
+                                    entry.as_service_info(info)
+                        except Exception:
+                            return
                     if info:
+                        try:
+                            addr = info.parsed_addresses()[0]
+                        except (IndexError, Exception):
+                            return
                         self.bridge.discovered_wtiu = {
                             'name': name,
-                            'host': info.parsed_addresses()[0],
+                            'host': addr,
                             'port': info.port,
                             'properties': info.properties
                         }
-                        logger.info(f"🎯 Found WTIU: {name} at {info.parsed_addresses()[0]}:{info.port}")
-                
+                        logger.info(f"🎯 Found WTIU: {name} at {addr}:{info.port}")
+
                 def remove_service(self, zeroconf, service_type, name):
                     pass
-                
+
                 def update_service(self, zeroconf, service_type, name):
                     pass
-            
+
             zeroconf = Zeroconf()
             listener = WTIUListener(self)
-            
+
             # Try MTH WTIU service names
             service_names = [
                 "_mth-dcs._tcp.local.",
@@ -3529,21 +3557,21 @@ class LionelMTHBridge:
                 "_mth._tcp.local.",
                 "_dcs._tcp.local."
             ]
-            
+
             for service_name in service_names:
                 browser = ServiceBrowser(zeroconf, service_name, listener)
                 time.sleep(2)  # Wait for discovery
-                
+
                 if hasattr(self, 'discovered_wtiu'):
                     logger.info(f"✅ Found WTIU using service: {service_name}")
                     zeroconf.close()
                     return True
                 else:
                     browser.cancel()
-            
+
             zeroconf.close()
             return False
-            
+
         except ImportError:
             logger.info("⚠️ zeroconf not available - using manual IP")
             return False
