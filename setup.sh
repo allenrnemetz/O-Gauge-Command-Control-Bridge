@@ -15,7 +15,7 @@ chmod +x *.sh 2>/dev/null
 # Make .desktop files executable
 chmod +x *.desktop 2>/dev/null
 
-# Mark .desktop files as trusted (Cinnamon/MATE requirement)
+# Mark .desktop files as trusted (required by some desktop environments)
 for f in *.desktop; do
     if [ -f "$f" ]; then
         gio set "$f" metadata::trusted true 2>/dev/null || true
