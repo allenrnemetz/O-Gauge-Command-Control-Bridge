@@ -32,12 +32,14 @@ See connection status and engine libraries from both the Lionel Base 3 and MTH W
 
 1. Click the blue **HACS** button at the top of this page — it opens HACS in your HA instance with this repository pre-filled
 2. Click **Download** to install the integration
+3. **Restart Home Assistant** (Settings → System → Power → Restart) — this is required for HA to load the new integration
 
 Alternatively, in HA:
 1. Go to **HACS** → **Integrations**
 2. Click the three dots (top right) → **Custom repositories**
 3. Add `https://github.com/allenrnemetz/O-Gauge-Command-Control-Bridge-on-Pi` as type **Integration**
 4. Find "Lionel MTH Bridge" and click **Download**
+5. **Restart Home Assistant** (Settings → System → Power → Restart)
 
 ### Step 2: Configure
 

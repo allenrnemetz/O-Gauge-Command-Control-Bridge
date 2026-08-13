@@ -390,9 +390,10 @@ Monitor your bridge from Home Assistant — see connection status and engine lib
 
 1. Click the blue **HACS** button above — it opens HACS in your HA instance with this repo pre-filled
 2. Click **Download** to install the integration
-3. Click the blue **Add Integration** button above (or go to Settings → Devices & Services → Add Integration → search "Lionel MTH Bridge")
-4. Enter your bridge's IP address and port (default: `8580`)
-5. Done — entities appear automatically and update every 30 seconds
+3. **Restart Home Assistant** (Settings → System → Power → Restart) — required for HA to load the new integration
+4. Click the blue **Add Integration** button above (or go to Settings → Devices & Services → Add Integration → search "Lionel MTH Bridge")
+5. Enter your bridge's IP address and port (default: `8580`)
+6. Done — entities appear automatically and update every 30 seconds
 
 ### How It Works
 
