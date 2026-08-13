@@ -191,7 +191,7 @@ class Config:
                 "simplified_handshake_first": True,
                 "mdns_discovery": True,
                 "fallback_hosts": [],
-                "default_port": 46311,
+                "default_port": "auto",
                 "auto_engine_mapping": True
             },
             "queue_settings": {
@@ -2322,8 +2322,8 @@ class LionelMTHBridge:
         # MTH discovery settings
         mth_settings = self.settings.get('mth_settings', {})
         self.mdns_discovery = mth_settings.get('mdns_discovery', True)
-        self.fallback_hosts = mth_settings.get('fallback_hosts', ['192.168.0.31:33069', '192.168.0.100:33069', '192.168.0.102:33069'])
-        self.default_mth_port = mth_settings.get('default_port', 33069)
+        self.fallback_hosts = mth_settings.get('fallback_hosts', [])
+        self.default_mth_port = mth_settings.get('default_port', 'auto')
         
         # Engine mapping settings
         self.engine_mappings = self.settings.get('engine_mappings', {})

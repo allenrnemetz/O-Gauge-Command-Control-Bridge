@@ -117,18 +117,19 @@ if [ -z "$MTH_IP" ]; then
     MTH_IP="auto"
 fi
 
-MTH_PORT="33069"
+MTH_PORT="auto"
 if [ "$MTH_IP" != "auto" ]; then
     MTH_PORT=$(zenity --entry \
         --title="Step 2b: MTH WTIU Port" \
         --text="Enter the port number for your MTH WTIU.\n\n\
-The default is 33069 — don't change this unless you know\n\
-your WTIU is using a different port." \
-        --entry-text="33069" \
+Leave it as 'auto' to discover the port automatically via mDNS.\n\n\
+Only enter a specific port number if auto-discovery doesn't work\n\
+and you know the exact port your WTIU is using." \
+        --entry-text="auto" \
         --width=400 2>/dev/null) || die "Installation cancelled."
 
     if [ -z "$MTH_PORT" ]; then
-        MTH_PORT="33069"
+        MTH_PORT="auto"
     fi
 fi
 
