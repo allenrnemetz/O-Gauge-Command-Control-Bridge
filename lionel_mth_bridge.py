@@ -116,6 +116,10 @@ PDI_SOP = 0xD1  # Start of Packet
 PDI_EOP = 0xDF  # End of Packet
 PDI_STF = 0xDE  # Stuff byte (escape)
 
+# Base 3 WiFi PDI connection (from PyTrain)
+BASE3_WIFI_PORT = 50001
+BASE3_KEEPALIVE = bytes([PDI_SOP, 0x29, 0xD7, PDI_EOP])  # D129D7DF
+
 # PDI Command Types (from PyTrain constants.py)
 class PdiCommand:
     BASE_ENGINE = 0x20
@@ -1108,6 +1112,296 @@ class LashupManager:
         return self.engine_list_strings.get(tr_id, "")
 
 
+class Base3WiFiClient:
+    """WiFi PDI client for querying the Base 3 engine library over TCP port 50001.
+
+    The Base 3 exposes a TCP interface on port 50001 for PDI database queries.
+    PDI packets are sent and received as hex-encoded uppercase ASCII strings
+    (e.g. the bytes D1 26 01 ... are sent as the ASCII string "D12601...").
+
+    This is the same protocol PyTrain uses (see base3_buffer.py). SER2 serial
+    only broadcasts TMCC commands; it does NOT support PDI database queries.
+    """
+
+    def __init__(self, bridge):
+        self.bridge = bridge
+        self.host = None
+        self.port = BASE3_WIFI_PORT
+        self.socket = None
+        self.lock = Lock()
+        self.connected = False
+        self._keepalive_thread = None
+        self._keepalive_running = False
+
+    @staticmethod
+    def _scan_for_base3(timeout=0.3):
+        """Scan local subnet for a device with port 50001 open (the Base 3).
+        Returns IP address string or None."""
+        import socket as _socket
+        try:
+            # Get local IP
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            return None
+
+        parts = local_ip.split(".")
+        network = ".".join(parts[:-1]) + "."
+        my_addr = int(parts[-1])
+
+        # Try common addresses first (low numbers often assigned to fixed devices)
+        candidates = [network + str(i) for i in range(2, 255) if i != my_addr]
+
+        for ip in candidates:
+            try:
+                with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as sock:
+                    sock.settimeout(timeout)
+                    sock.connect((ip, BASE3_WIFI_PORT))
+                    logger.info(f"📡 Found Base 3 at {ip}:{BASE3_WIFI_PORT}")
+                    return ip
+            except (_socket.timeout, ConnectionRefusedError, OSError):
+                continue
+        return None
+
+    def connect(self, host=None):
+        """Connect to the Base 3 WiFi interface. If host is None, scan the network."""
+        with self.lock:
+            if self.socket:
+                try:
+                    self.socket.close()
+                except Exception:
+                    pass
+                self.socket = None
+
+            if host:
+                self.host = host
+            elif not self.host:
+                logger.info("📡 Scanning network for Base 3 WiFi (port 50001)...")
+                self.host = self._scan_for_base3()
+
+            if not self.host:
+                logger.warning("⚠️ Base 3 not found on network (port 50001)")
+                self.connected = False
+                return False
+
+            try:
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.socket.settimeout(5.0)
+                self.socket.connect((self.host, self.port))
+                self.socket.settimeout(1.0)
+                self.connected = True
+                logger.info(f"✅ Connected to Base 3 WiFi at {self.host}:{self.port}")
+                self._start_keepalive()
+                return True
+            except Exception as e:
+                logger.error(f"❌ Base 3 WiFi connection failed: {e}")
+                self.connected = False
+                return False
+
+    def _start_keepalive(self):
+        """Start sending keepalive packets every 2 seconds (Base 3 requirement)."""
+        if self._keepalive_running:
+            return
+        self._keepalive_running = True
+        self._keepalive_thread = threading.Thread(target=self._keepalive_loop, daemon=True)
+        self._keepalive_thread.start()
+
+    def _keepalive_loop(self):
+        while self._keepalive_running and self.connected:
+            try:
+                self.send_pdi(BASE3_KEEPALIVE)
+                time.sleep(2.0)
+            except Exception:
+                self.connected = False
+                break
+
+    def send_pdi(self, data: bytes) -> bool:
+        """Send a PDI packet as hex-encoded uppercase ASCII over TCP."""
+        if not self.socket or not self.connected:
+            return False
+        try:
+            hex_str = data.hex().upper().encode()
+            with self.lock:
+                self.socket.sendall(hex_str)
+            return True
+        except Exception as e:
+            logger.debug(f"📡 Base 3 WiFi send error: {e}")
+            self.connected = False
+            return False
+
+    def recv_pdi(self, timeout=2.0) -> bytes | None:
+        """Receive a PDI response. The Base 3 sends hex-encoded ASCII.
+        Returns raw bytes (decoded from hex ASCII) or None on timeout."""
+        if not self.socket or not self.connected:
+            return None
+        try:
+            self.socket.settimeout(timeout)
+            with self.lock:
+                data = self.socket.recv(4096)
+            if not data:
+                return None
+            # Base 3 sends hex-encoded ASCII; decode to raw bytes
+            hex_str = data.decode('ascii', errors='ignore').strip()
+            # May contain multiple packets; take the first complete one
+            return bytes.fromhex(hex_str)
+        except socket.timeout:
+            return None
+        except Exception as e:
+            logger.debug(f"📡 Base 3 WiFi recv error: {e}")
+            return None
+
+    def query_engine(self, engine_id: int, timeout=2.0) -> dict | None:
+        """Query a single engine record from the Base 3 via WiFi PDI BASE_MEMORY."""
+        if not self.connected:
+            return None
+
+        # Build BASE_MEMORY request (same as SER2 version)
+        payload = bytearray()
+        payload.append(PdiCommand.BASE_MEMORY)   # 0x26
+        payload.append(engine_id)
+        payload.append(0x02)                      # flags = read
+        payload.append(0x00)                      # status
+        payload.append(0x01)                      # record_type = ENGINE
+        payload.extend((0).to_bytes(4, 'little')) # start = 0
+        payload.append(0x02)                      # database EEProm
+        payload.append(0xC0)                      # data_length = 192
+
+        # Calculate checksum and stuff
+        stuffed, checksum = self._calc_checksum_and_stuff(bytes(payload))
+        packet = bytes([PDI_SOP]) + stuffed + checksum + bytes([PDI_EOP])
+
+        # Send and receive
+        if not self.send_pdi(packet):
+            return None
+
+        response = self.recv_pdi(timeout)
+        if not response:
+            return None
+
+        return self._parse_engine_response(response, engine_id)
+
+    @staticmethod
+    def _calc_checksum_and_stuff(data: bytes) -> tuple:
+        """Calculate PDI checksum and apply byte stuffing."""
+        byte_stream = bytearray()
+        check_sum = 0
+        for b in data:
+            check_sum += b
+            if b in (PDI_SOP, PDI_STF, PDI_EOP):
+                check_sum += PDI_STF
+                byte_stream.append(PDI_STF)
+            byte_stream.append(b)
+        byte_sum = check_sum
+        check_sum = 0xFF & (0 - check_sum)
+        if check_sum in (PDI_SOP, PDI_STF, PDI_EOP):
+            byte_stream.append(PDI_STF)
+            byte_sum += PDI_STF
+            check_sum = 0xFF & (0 - byte_sum)
+        return bytes(byte_stream), bytes([check_sum])
+
+    @staticmethod
+    def _unstuff_bytes(data: bytes) -> bytes:
+        """Remove PDI stuff bytes."""
+        result = bytearray()
+        i = 0
+        while i < len(data):
+            if data[i] == PDI_STF and i + 1 < len(data):
+                result.append(data[i + 1])
+                i += 2
+            else:
+                result.append(data[i])
+                i += 1
+        return bytes(result)
+
+    @staticmethod
+    def _verify_checksum(data: bytes) -> bool:
+        """Verify PDI checksum. data includes SOP and EOP."""
+        if len(data) < 4:
+            return False
+        # Sum all bytes between SOP and checksum
+        total = 0
+        for b in data[1:-2]:  # Skip SOP and last 2 (checksum + EOP)
+            total += b
+        expected = 0xFF & (0 - total)
+        return expected == data[-2]
+
+    def _parse_engine_response(self, data: bytes, engine_id: int) -> dict | None:
+        """Parse BASE_MEMORY response into engine record."""
+        try:
+            # Find SOP and EOP
+            if data[0] != PDI_SOP or data[-1] != PDI_EOP:
+                # Try to find packet boundaries
+                start = data.find(PDI_SOP)
+                end = data.rfind(PDI_EOP)
+                if start < 0 or end < 0 or end <= start:
+                    return None
+                data = data[start:end + 1]
+
+            unstuffed = self._unstuff_bytes(data[1:-2])  # Remove SOP, EOP, checksum
+
+            if len(unstuffed) < 11:
+                return None
+
+            # BASE_MEMORY response header: cmd(1) + engine_id(1) + flags(1) + status(1)
+            # + record_type(1) + start(4) + eeprom(1) + data_length(1) = 11 bytes
+            resp_engine_id = unstuffed[1]
+            data_length = unstuffed[10]
+            record_data = unstuffed[11:]  # After header
+
+            if len(record_data) < 0xC0:
+                logger.debug(f"📡 Base 3 WiFi: engine {engine_id} record too short ({len(record_data)} bytes)")
+                return None
+
+            # CompData offsets (from PyTrain EngineData):
+            road_name_len = record_data[0x1E]
+            road_name = None
+            if road_name_len > 0:
+                road_name = record_data[0x1F:0x1F + 31]
+                road_name = road_name.split(b'\x00')[0].decode('ascii', errors='ignore').strip()
+
+            road_number_len = record_data[0x3E]
+            road_number = None
+            if road_number_len > 0:
+                road_number = record_data[0x3F:0x3F + 4]
+                road_number = road_number.split(b'\x00')[0].decode('ascii', errors='ignore').strip()
+
+            # Empty slot check
+            if not road_name and not road_number:
+                return None
+
+            result = {
+                'tmcc_id': resp_engine_id,
+                'road_name': road_name,
+                'road_number': road_number,
+                'loco_type': record_data[0x43] if len(record_data) > 0x43 else None,
+                'control_type': record_data[0x44] if len(record_data) > 0x44 else None,
+                'sound_type': record_data[0x45] if len(record_data) > 0x45 else None,
+                'last_train_id': record_data[0x1C] if len(record_data) > 0x1C else None,
+                'raw_data': record_data,
+            }
+
+            logger.info(f"🚂 Base 3 engine #{result['tmcc_id']}: {road_name} #{road_number or ''} (type={result['loco_type']})")
+            return result
+
+        except Exception as e:
+            logger.debug(f"📡 Base 3 WiFi parse error: {e}")
+            return None
+
+    def disconnect(self):
+        """Disconnect from Base 3 WiFi."""
+        self._keepalive_running = False
+        self.connected = False
+        if self.socket:
+            try:
+                self.socket.close()
+            except Exception:
+                pass
+            self.socket = None
+        logger.info("📡 Disconnected from Base 3 WiFi")
+
+
 class PdiClient:
     """PDI client for querying Base 3 train data via SER2 serial port only"""
     
@@ -1698,6 +1992,8 @@ class StatusHTTPHandler(http.server.BaseHTTPRequestHandler):
                 # Snapshot connection state too
                 online = bridge.running
                 base3_connected = bridge.lionel_serial is not None and bridge.lionel_serial.is_open
+                base3_wifi_connected = getattr(bridge, 'base3_wifi', None) and bridge.base3_wifi.connected
+                base3_wifi_host = getattr(bridge, 'base3_wifi', None) and bridge.base3_wifi.host
                 wtiu_connected = bridge.mth_connected
                 wtiu_host = getattr(bridge, 'mth_host', 'unknown')
                 discovered_mappings = dict(bridge.discovered_mth_engines)
@@ -1706,6 +2002,8 @@ class StatusHTTPHandler(http.server.BaseHTTPRequestHandler):
             status = {
                 'online': online,
                 'base3_connected': base3_connected,
+                'base3_wifi_connected': base3_wifi_connected,
+                'base3_wifi_host': base3_wifi_host,
                 'wtiu_connected': wtiu_connected,
                 'wtiu_host': wtiu_host,
                 'lionel_engines': lionel_engines,
@@ -2080,6 +2378,14 @@ class LionelMTHBridge:
         self.lashup_manager = LashupManager(self)
         self.pending_train_queries = set()
         self.queried_trains = set()  # TR IDs we've already queried (no need to re-query)  # Train IDs to query after lashup commands
+
+        # Base 3 WiFi PDI client for engine library and switch queries.
+        # The Base 3 exposes TCP port 50001 for PDI database queries over WiFi.
+        # SER2 serial only broadcasts TMCC commands — it does NOT support PDI queries.
+        base3_host = self.settings.get('base3_host', 'auto')
+        self.base3_wifi = Base3WiFiClient(self)
+        if base3_host and base3_host != 'auto':
+            self.base3_wifi.host = base3_host
         
         # TCP serial proxy for sharing SER2 with PyTrain and other apps
         tcp_proxy_settings = self.settings.get('tcp_proxy', {})
@@ -3367,65 +3673,52 @@ class LionelMTHBridge:
             logger.error(f"❌ Could not save engine mappings: {e}")
 
     def discover_base3_engines(self):
-        """Scan Base 3 engine library via PDI BASE_ENGINE (0x20) queries.
+        """Scan Base 3 engine library via WiFi PDI BASE_MEMORY (0x26) queries.
 
-        Scans all 99 engine slots and builds self.lionel_engine_library.
-        Runs in a background thread to avoid blocking the main listener.
-        The Base 3 library is static (changed only via Lionel app), so this
-        runs on startup and on HA refresh button click — not periodically.
+        The Base 3 only answers PDI database queries over WiFi (TCP port 50001),
+        NOT over SER2 serial. This method connects to the Base 3 WiFi interface
+        and queries all 99 engine slots.
         """
-        # Wait for serial connection to come up (auto-reconnect may still be trying)
-        for _ in range(30):
-            if self.lionel_serial and self.lionel_serial.is_open:
-                break
-            time.sleep(1)
-        if not self.lionel_serial or not self.lionel_serial.is_open:
-            logger.warning("⚠️ Cannot scan Base 3 library - SER2 not connected")
-            return
+        # Ensure WiFi connection
+        if not self.base3_wifi.connected:
+            base3_host = self.settings.get('base3_host', 'auto')
+            if base3_host == 'auto':
+                if not self.base3_wifi.connect():
+                    logger.warning("⚠️ Cannot scan Base 3 library - WiFi not connected")
+                    return
+            elif base3_host:
+                if not self.base3_wifi.connect(base3_host):
+                    logger.warning("⚠️ Cannot scan Base 3 library - WiFi not connected")
+                    return
+            else:
+                logger.warning("⚠️ Cannot scan Base 3 library - base3_host not configured")
+                return
 
-        logger.info("📚 Scanning Base 3 engine library (99 slots)...")
+        logger.info("📚 Scanning Base 3 engine library via WiFi (99 slots)...")
         found = 0
         new_library = {}
-        queries_ok = 0  # Count successful queries (even if slot was empty)
-        queries_failed = 0  # Count queries that errored (serial disconnected?)
 
         for engine_id in range(1, 100):
-            result = self.pdi_client.query_engine_data_ser2(engine_id, timeout=0.5)
-            if result is None:
-                # None could mean "empty slot" (normal) or "query failed" (serial error)
-                # Check if serial is still open — if not, the remaining slots will all fail
-                if not self.lionel_serial or not self.lionel_serial.is_open:
-                    queries_failed += 1
-                    logger.warning(f"⚠️ Base 3 scan interrupted at slot {engine_id} - serial disconnected")
-                    break
-            else:
-                queries_ok += 1
-                if result.get('road_name'):
-                    new_library[engine_id] = {
-                        'road_name': result['road_name'],
-                        'road_number': result.get('road_number'),
-                        'loco_type': result.get('loco_type'),
-                        'control_type': result.get('control_type'),
-                        'sound_type': result.get('sound_type'),
-                        'last_train_id': result.get('last_train_id'),
-                    }
-                    found += 1
+            result = self.base3_wifi.query_engine(engine_id, timeout=2.0)
+            if result:
+                new_library[engine_id] = {
+                    'road_name': result.get('road_name'),
+                    'road_number': result.get('road_number'),
+                    'loco_type': result.get('loco_type'),
+                    'control_type': result.get('control_type'),
+                    'sound_type': result.get('sound_type'),
+                    'last_train_id': result.get('last_train_id'),
+                }
+                found += 1
 
-        # Only replace the library if we got through the scan without a serial disconnect.
-        # If the serial dropped mid-scan, keep the old library so HA still shows valid data.
-        if queries_failed > 0 and found == 0 and self.lionel_engine_library:
-            logger.warning("⚠️ Base 3 scan failed completely - keeping previous library data")
-        elif queries_failed > 0 and found > 0:
-            # Partial scan — merge new findings into existing library
-            with self.engine_data_lock:
-                merged = dict(self.lionel_engine_library)
-                merged.update(new_library)
-                self.lionel_engine_library = merged
-            logger.info(f"📚 Base 3 library scan partial: {found} engines found, {queries_failed} slots skipped (serial disconnected)")
-        else:
-            with self.engine_data_lock:
-                self.lionel_engine_library = new_library
-            logger.info(f"📚 Base 3 library scan complete: {found} engines found")
+            # Check if connection dropped
+            if not self.base3_wifi.connected:
+                logger.warning(f"⚠️ Base 3 WiFi scan interrupted at slot {engine_id}")
+                break
+
+        with self.engine_data_lock:
+            self.lionel_engine_library = new_library
+        logger.info(f"📚 Base 3 library scan complete: {found} engines found")
         for eid, info in sorted(new_library.items()):
             logger.info(f"   Lionel #{eid}: {info['road_name']} #{info.get('road_number') or ''}")
 
@@ -5612,12 +5905,20 @@ class LionelMTHBridge:
             except Exception as e:
                 logger.error(f"❌ Could not start HA status endpoint: {e}")
 
-        # Base 3 engine library scan is NOT run on startup.
-        # Sending PDI queries to the Base 3 via SER2 can disrupt TMCC
-        # packet broadcasting. Scan only when the user explicitly requests
-        # it via the HA refresh button (POST /refresh endpoint).
-        # The listener thread (started above) just listens for TMCC data,
-        # exactly like v1.3 did.
+        # Connect to Base 3 via WiFi (port 50001) for PDI database queries.
+        # This is separate from SER2 serial (TMCC command listening).
+        # The Base 3 only answers engine library queries over WiFi, not SER2.
+        # Connection runs in background so it doesn't block startup.
+        def _connect_base3_wifi():
+            base3_host = self.settings.get('base3_host', 'auto')
+            if base3_host == 'auto':
+                self.base3_wifi.connect()  # Will scan the network
+            elif base3_host:
+                self.base3_wifi.connect(base3_host)
+            # If connected, scan engine library
+            if self.base3_wifi.connected:
+                self.discover_base3_engines()
+        threading.Thread(target=_connect_base3_wifi, daemon=True).start()
 
         return True
     

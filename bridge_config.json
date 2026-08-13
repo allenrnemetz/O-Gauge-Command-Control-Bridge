@@ -3,6 +3,7 @@
     "legacy_enabled": true,
     "mth_host": "auto",
     "mth_port": "auto",
+    "base3_host": "auto",
     "debug": false,
     "engine_mappings": {},
     "engine_name_overrides": {},
