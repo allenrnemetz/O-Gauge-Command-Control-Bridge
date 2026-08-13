@@ -3992,6 +3992,9 @@ class LionelMTHBridge:
         
         # Try mDNS discovery first if enabled
         if self.mdns_discovery and self.mth_host == 'auto':
+            # Clear stale discovery result so we don't reuse an old port
+            if hasattr(self, 'discovered_wtiu'):
+                del self.discovered_wtiu
             logger.info("🔍 Attempting MTH WTIU mDNS discovery...")
             if self.discover_wtiu_mdns():
                 logger.info("✅ mDNS discovery successful")
