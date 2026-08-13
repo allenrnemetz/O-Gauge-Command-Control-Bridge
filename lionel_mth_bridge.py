@@ -1335,22 +1335,29 @@ class PdiClient:
             logger.error(f"❌ PDI parse error: {e}")
             return None
 
-    # ---- Base 3 Engine Library Retrieval (PDI BASE_ENGINE 0x20) ----
-    # Record structure from PyTrain (base_req.py lines 315-349):
-    #   offset 11-43: road name (33 bytes ASCII, null-terminated)
-    #   offset 44-48: road number (5 bytes ASCII)
-    #   offset 49:    loco type (0=Diesel, 1=Steam, 2=Electric, 3=Subway, 8=Acela...)
-    #   offset 50:    control type
-    #   offset 51:    sound type
-    #   offset 63:    last train ID (consist assignment)
-    # Record is 0xC0 (192) bytes. Offsets below are from record_data (after
-    # stripping the 3-byte cmd+id+action header), so they are PyTrain offset - 3.
+    # ---- Base 3 Engine Library Retrieval (PDI BASE_MEMORY 0x26) ----
+    # PyTrain uses BASE_MEMORY (0x26) to read engine records, NOT BASE_ENGINE (0x20).
+    # The BASE_MEMORY request format (from PyTrain base_req.py as_bytes):
+    #   cmd(0x26) + engine_id + flags(0x02) + status(0x00) + record_type(0x01=ENGINE)
+    #   + start(4 bytes LE) + eeprom(0x02) + data_length(0xC0)
+    # The response contains the engine record data (0xC0 bytes) with CompData offsets:
+    #   0x1E: road_name_len, 0x1F: road_name (31 bytes)
+    #   0x3E: road_number_len, 0x3F: road_number (4 bytes)
+    #   0x43: engine_type, 0x44: control_type, 0x45: sound_type
 
     def build_engine_read_request(self, engine_id: int) -> bytes:
-        """Build PDI request to read engine data from Base 3 library"""
-        ACTION_CONFIG = 0x03
-        payload = bytes([PdiCommand.BASE_ENGINE, engine_id, ACTION_CONFIG])
-        stuffed, checksum = self._calculate_checksum_and_stuff(payload)
+        """Build PDI BASE_MEMORY request to read engine data from Base 3 library"""
+        # BASE_MEMORY format from PyTrain
+        payload = bytearray()
+        payload.append(PdiCommand.BASE_MEMORY)   # 0x26
+        payload.append(engine_id)                 # engine ID (1-99)
+        payload.append(0x02)                      # flags = read
+        payload.append(0x00)                      # status
+        payload.append(0x01)                      # record_type = ENGINE
+        payload.extend((0).to_bytes(4, 'little')) # start = 0
+        payload.append(0x02)                      # database EEProm
+        payload.append(0xC0)                      # data_length = 192 bytes
+        stuffed, checksum = self._calculate_checksum_and_stuff(bytes(payload))
         return bytes([PDI_SOP]) + stuffed + checksum + bytes([PDI_EOP])
 
     def query_engine_data_ser2(self, engine_id: int, timeout: float = 1.0) -> dict:
@@ -1415,12 +1422,12 @@ class PdiClient:
                 return None
 
     def _parse_engine_response(self, data: bytes) -> dict:
-        """Parse PDI BASE_ENGINE response data into engine library record"""
+        """Parse PDI BASE_MEMORY response data into engine library record"""
         try:
             # Unstuff the data
             unstuffed = self._unstuff_bytes(data)
 
-            if len(unstuffed) < 3:
+            if len(unstuffed) < 11:
                 return None
 
             # Verify checksum
@@ -1428,25 +1435,38 @@ class PdiClient:
                 logger.debug(f"📡 PDI: Engine response checksum failed: {unstuffed.hex()}")
                 return None
 
-            # Skip header: cmd(1) + engine_id(1) + action(1) = 3 bytes, remove checksum
-            record_data = unstuffed[3:-1]
+            # BASE_MEMORY response header:
+            # cmd(1) + engine_id(1) + flags(1) + status(1) + record_type(1)
+            # + start(4) + eeprom(1) + data_length(1) = 11 bytes, then data, then checksum(1)
+            engine_id = unstuffed[1]
+            data_length = unstuffed[10]
+            record_data = unstuffed[11:-1]  # Skip header and checksum
 
-            # Extract fields using PyTrain offsets (adjusted by -3 for header)
-            road_name = self._decode_text(record_data[8:41])    # PyTrain offset 11-43
-            road_number = self._decode_text(record_data[41:46]) # PyTrain offset 44-48
+            if len(record_data) < 0xC0:
+                logger.debug(f"📡 PDI: Engine record too short: {len(record_data)} bytes")
+                return None
 
-            # If road_name is None, this is an empty slot
-            if road_name is None:
+            # CompData offsets (from PyTrain comp_data.py EngineData):
+            # 0x1E: road_name_len, 0x1F-0x3D: road_name (31 bytes)
+            # 0x3E: road_number_len, 0x3F-0x42: road_number (4 bytes)
+            # 0x43: engine_type, 0x44: control_type, 0x45: sound_type
+            road_name_len = record_data[0x1E]
+            road_name = self._decode_text(record_data[0x1F:0x1F + 31]) if road_name_len > 0 else None
+            road_number_len = record_data[0x3E]
+            road_number = self._decode_text(record_data[0x3F:0x3F + 4]) if road_number_len > 0 else None
+
+            # If road_name is None and road_number is None, this is an empty slot
+            if road_name is None and road_number is None:
                 return None
 
             result = {
-                'tmcc_id': unstuffed[1],
+                'tmcc_id': engine_id,
                 'road_name': road_name,
                 'road_number': road_number,
-                'loco_type': record_data[46] if len(record_data) > 46 else None,    # offset 49
-                'control_type': record_data[47] if len(record_data) > 47 else None,  # offset 50
-                'sound_type': record_data[48] if len(record_data) > 48 else None,    # offset 51
-                'last_train_id': record_data[60] if len(record_data) > 60 else None, # offset 63
+                'loco_type': record_data[0x43] if len(record_data) > 0x43 else None,
+                'control_type': record_data[0x44] if len(record_data) > 0x44 else None,
+                'sound_type': record_data[0x45] if len(record_data) > 0x45 else None,
+                'last_train_id': record_data[0x1C] if len(record_data) > 0x1C else None,
                 'raw_data': record_data,
             }
 
