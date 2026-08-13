@@ -117,7 +117,7 @@ if [ "$CURRENT_DIR" != "$INSTALL_DIR" ]; then
     # (rsync would be cleaner but may not be installed; use cp)
     for f in lionel_mth_bridge.py tmcc_wled.py install.sh gui_install.sh gui_update.sh \
              "START HERE.txt" \
-             "Install Bridge.sh" "Update Bridge.sh" setup.sh \
+             "Install (Easy Method).sh" "Update (Easy Method).sh" setup.sh \
              README.md LICENSE bridge_config.json .gitignore .gitattributes; do
         if [ -f "$CURRENT_DIR/$f" ]; then
             cp "$CURRENT_DIR/$f" "$INSTALL_DIR/" 2>/dev/null || true

@@ -188,7 +188,7 @@ LOG_FILE="/tmp/lionel_mth_bridge_update_$$.log"
     #          bridge_config.json (only if user's config is elsewhere), README.md, etc.
     FILES_TO_COPY="lionel_mth_bridge.py tmcc_wled.py install.sh gui_install.sh gui_update.sh
                    'START HERE.txt'
-                   'Install Bridge.sh' 'Update Bridge.sh' setup.sh
+                   'Install (Easy Method).sh' 'Update (Easy Method).sh' setup.sh
                    README.md LICENSE lionel-mth-bridge.service .gitignore .gitattributes
                    hacs.json"
 
