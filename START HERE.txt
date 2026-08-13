@@ -1,0 +1,142 @@
+==============================================================
+  LIONEL MTH COMMAND CONTROL BRIDGE - EASY INSTALL
+==============================================================
+
+  This file has simple instructions for installing the bridge
+  software without needing to know Linux.
+
+  You should be sitting in front of the computer or Raspberry Pi
+  that will run the bridge, with its desktop screen visible.
+
+
+------------------------------------------------------------
+  WHAT YOU NEED BEFORE STARTING
+------------------------------------------------------------
+
+  1. Your FTDI USB-serial adapter plugged into a USB port
+     on this computer/Pi
+
+  2. Your MTH WTIU powered on and connected to your network
+     (same WiFi or same router as this computer/Pi)
+
+  3. Your Lionel Base 3 and remote ready (you don't need
+     these for the install, just for using the bridge later)
+
+
+------------------------------------------------------------
+  STEP 1: DOWNLOAD THE SOFTWARE
+------------------------------------------------------------
+
+  Open your web browser and go to:
+
+     https://github.com/allenrnemetz/O-Gauge-Command-Control-Bridge-on-Pi/releases/latest
+
+  Scroll down to the "Assets" section and click:
+
+     Source code (zip)
+
+  This downloads a ZIP file to your Downloads folder.
+
+
+------------------------------------------------------------
+  STEP 2: EXTRACT THE ZIP
+------------------------------------------------------------
+
+  Find the downloaded ZIP file (usually in your Downloads
+  folder). It will be named something like:
+
+     O-Gauge-Command-Control-Bridge-on-Pi-1.3.0.zip
+
+  Right-click it and choose:
+
+     "Extract Here"  (or "Extract to folder...")
+
+  You should now see a folder with the extracted files.
+
+
+------------------------------------------------------------
+  STEP 3: RUN THE INSTALLER
+------------------------------------------------------------
+
+  Open the extracted folder. You should see a file called:
+
+     Install Bridge
+
+  It has a software/install icon (a box with a green arrow
+  or similar).
+
+  Double-click "Install Bridge".
+
+  A window will pop up guiding you through the installation.
+  Just click OK / answer the questions and click OK.
+
+  When it asks for your password, type the password you use
+  to log into this computer/Pi. (This is needed to install
+  the background service.)
+
+
+------------------------------------------------------------
+  IF DOUBLE-CLICK DOESN'T WORK
+------------------------------------------------------------
+
+  Some systems need you to "allow" the file to run first.
+
+  Option A: Right-click "Install Bridge" and look for:
+     - "Allow launching" or
+     - "Properties" -> "Permissions" -> check "Allow executing
+       file as program"
+     Then double-click it again.
+
+  Option B: Open a terminal in this folder and type:
+
+     bash gui_install.sh
+
+     then press Enter.
+
+
+------------------------------------------------------------
+  STEP 4: CHECK IT'S WORKING
+------------------------------------------------------------
+
+  After the installer finishes, it will tell you it's done.
+
+  To verify the bridge is running, open a terminal and type:
+
+     sudo systemctl status lionel-mth-bridge
+
+  You should see "active (running)" in green.
+
+  To see live logs of what the bridge is doing:
+
+     sudo journalctl -u lionel-mth-bridge -f
+
+  Press Ctrl+C to stop viewing logs (the bridge keeps running).
+
+
+------------------------------------------------------------
+  STEP 5: ADD YOUR ENGINES (ONE-TIME SETUP)
+------------------------------------------------------------
+
+  Before you can control trains, you need to add your MTH
+  engines to the WTIU using the MTH DCS app on your phone
+  or tablet:
+
+     1. Open the MTH DCS app
+     2. Connect to your WTIU
+     3. Go to "Add Engine" and follow the prompts
+     4. Note the engine number shown in the app
+
+  Then set your Lionel remote to the same engine number.
+  The bridge handles the rest automatically.
+
+
+------------------------------------------------------------
+  NEED HELP?
+------------------------------------------------------------
+
+  Full documentation is in the README.md file in this folder.
+
+  For troubleshooting, see the "Troubleshooting" section
+  near the bottom of README.md.
+
+==============================================================

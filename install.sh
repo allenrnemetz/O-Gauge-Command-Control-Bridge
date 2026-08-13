@@ -1,6 +1,11 @@
 #!/bin/bash
 # Lionel MTH Bridge Installation Script
 # Automatically installs dependencies and sets up the bridge
+#
+# Can be run interactively (default) or non-interactively by setting
+# NONINTERACTIVE=1 and providing config via environment variables:
+#   PI_USER, MTH_IP, MTH_PORT, CONFIGURE_WLED, WLED_IP, WLED_ACC_ID, WLED_LED_COUNT
+# When NONINTERACTIVE=1, any unset variable falls back to its default.
 
 set -e  # Exit on any error
 
@@ -26,6 +31,27 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Helper: prompt for a value if not already set via env var.
+# Usage: prompt_with_default VAR_NAME "prompt text" "default value"
+# If the env var is already set, uses it without prompting.
+# Otherwise prompts interactively (unless NONINTERACTIVE=1, then uses default).
+prompt_with_default() {
+    local var_name="$1"
+    local prompt_text="$2"
+    local default_val="$3"
+    local current_val="${!var_name}"
+
+    if [[ -n "$current_val" ]]; then
+        print_status "$prompt_text: $current_val (from env)"
+    elif [[ "$NONINTERACTIVE" == "1" ]]; then
+        eval "$var_name=\"$default_val\""
+        print_status "$prompt_text: $default_val (default, non-interactive)"
+    else
+        read -p "$prompt_text [$default_val]: " input
+        eval "$var_name=\"${input:-$default_val}\""
+    fi
+}
+
 # Check if running as root
 if [[ $EUID -eq 0 ]]; then
    print_warning "Running as root. This may not be necessary for all operations."
@@ -36,8 +62,12 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     OS="linux"
     if command -v apt-get &> /dev/null; then
         DISTRO="debian"
+    elif command -v dnf &> /dev/null; then
+        DISTRO="fedora"
     elif command -v yum &> /dev/null; then
         DISTRO="redhat"
+    elif command -v zypper &> /dev/null; then
+        DISTRO="opensuse"
     elif command -v pacman &> /dev/null; then
         DISTRO="arch"
     else
@@ -58,8 +88,7 @@ fi
 
 # Prompt for username
 echo ""
-read -p "Enter the Raspberry Pi username to run the service as [$USER]: " PI_USER
-PI_USER=${PI_USER:-$USER}
+prompt_with_default PI_USER "Enter the username to run the service as" "$USER"
 print_status "Service will run as user: $PI_USER"
 
 # Get the home directory for the specified user
@@ -96,12 +125,10 @@ fi
 echo ""
 echo "🚂 MTH WTIU Configuration"
 echo "========================"
-read -p "Enter the IP address of your MTH WTIU (or 'auto' for mDNS discovery) [auto]: " MTH_IP
-MTH_IP=${MTH_IP:-auto}
+prompt_with_default MTH_IP "Enter the IP address of your MTH WTIU (or 'auto' for mDNS discovery)" "auto"
 
 if [ "$MTH_IP" != "auto" ]; then
-    read -p "Enter the port of your MTH WTIU [33069]: " MTH_PORT
-    MTH_PORT=${MTH_PORT:-33069}
+    prompt_with_default MTH_PORT "Enter the port of your MTH WTIU" "33069"
     MTH_HOST="$MTH_IP:$MTH_PORT"
     print_status "Configuring MTH WTIU at $MTH_HOST"
 
@@ -129,19 +156,13 @@ fi
 echo ""
 echo "🎨 WLED LED Strip Controller Configuration"
 echo "==========================================="
-read -p "Do you have a WLED controller to configure? (y/n) [n]: " CONFIGURE_WLED
-CONFIGURE_WLED=${CONFIGURE_WLED:-n}
+prompt_with_default CONFIGURE_WLED "Do you have a WLED controller to configure? (y/n)" "n"
 
 if [[ "$CONFIGURE_WLED" =~ ^[Yy]$ ]]; then
-    read -p "Enter the IP address of your WLED controller [192.168.0.10]: " WLED_IP
-    WLED_IP=${WLED_IP:-192.168.0.10}
-    
-    read -p "Enter the ACC/Switch ID to control WLED (1-99) [50]: " WLED_ACC_ID
-    WLED_ACC_ID=${WLED_ACC_ID:-50}
-    
-    read -p "Enter the total number of LEDs on your strip(s) [100]: " WLED_LED_COUNT
-    WLED_LED_COUNT=${WLED_LED_COUNT:-100}
-    
+    prompt_with_default WLED_IP "Enter the IP address of your WLED controller" "192.168.0.10"
+    prompt_with_default WLED_ACC_ID "Enter the ACC/Switch ID to control WLED (1-99)" "50"
+    prompt_with_default WLED_LED_COUNT "Enter the total number of LEDs on your strip(s)" "100"
+
     print_status "Configuring WLED: IP=$WLED_IP, ACC ID=$WLED_ACC_ID, LED Count=$WLED_LED_COUNT"
     
     # Update the config file with WLED settings using Python for JSON manipulation

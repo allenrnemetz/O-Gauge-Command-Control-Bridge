@@ -51,6 +51,51 @@ Remote → Base 3 → SER2 → FTDI → Raspberry Pi → WiFi → WTIU → Track
 
 ## Installation
 
+There are two ways to install:
+
+- **Easy Desktop Install** (recommended for non-savvy users) — download a ZIP, double-click an icon, follow the GUI wizard. No terminal or SSH required.
+- **Manual Install** (for advanced users) — SSH in, clone the repo, run `install.sh` from the terminal.
+
+---
+
+### Easy Desktop Install (GUI, no terminal required)
+
+This method works on any Linux desktop with zenity and systemd. Supported platforms:
+
+| Platform | Desktop | Notes |
+|----------|---------|-------|
+| Raspberry Pi 3B+ / 4 / 5 | Raspberry Pi OS Desktop | Primary target |
+| Linux Mint | Cinnamon, MATE, XFCE | zenity preinstalled |
+| Ubuntu | GNOME, KDE, XFCE | zenity preinstalled |
+| Debian (with desktop) | GNOME, KDE, XFCE, MATE | |
+| Pop!_OS | GNOME (COSMIC) | zenity preinstalled |
+| Fedora Workstation + spins | GNOME, KDE, XFCE, etc. | zenity preinstalled |
+| Manjaro / Arch (with desktop) | GNOME, KDE, XFCE, etc. | |
+| openSUSE (with desktop) | GNOME, KDE, XFCE | |
+
+**Steps:**
+
+1. On the machine that will run the bridge (with its desktop screen visible), open a web browser and go to:
+   ```
+   https://github.com/allenrnemetz/O-Gauge-Command-Control-Bridge-on-Pi/releases/latest
+   ```
+2. Download **Source code (zip)** from the Assets section
+3. Extract the ZIP (right-click → Extract Here)
+4. Open the extracted folder and double-click **Install Bridge**
+5. Follow the on-screen wizard — it will ask for your username, WTIU address (defaults to auto-discovery), and whether you have WLED
+6. Enter your password when prompted (needed to install the background service)
+7. Done — the bridge is running and will start automatically on boot
+
+> **If double-click doesn't work:** Right-click "Install Bridge" → "Allow launching" (or Properties → Permissions → allow executing). Alternatively, open a terminal in the folder and run `bash gui_install.sh`.
+
+> **Hardware requirement:** The FTDI USB-serial adapter must be plugged into the machine running the bridge, and that machine must be on the same network subnet as the MTH WTIU.
+
+See **START HERE.txt** in the download for plain-English instructions.
+
+---
+
+### Manual Install (terminal / SSH)
+
 ### Step 1: Raspberry Pi Setup
 
 1. Install **Raspberry Pi OS** (Lite or Desktop) on your Pi
@@ -73,7 +118,7 @@ SSH into your Raspberry Pi and clone the repository:
 
 ```bash
 cd ~
-git clone https://github.com/allenrnemetz/O-Gauge-Command-Control-Bridge.git lionel-mth-bridge
+git clone https://github.com/allenrnemetz/O-Gauge-Command-Control-Bridge-on-Pi.git lionel-mth-bridge
 cd lionel-mth-bridge
 ```
 

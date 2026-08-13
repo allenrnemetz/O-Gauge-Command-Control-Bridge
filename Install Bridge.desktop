@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Install Bridge
+Name[en_US]=Install Bridge
+Comment=Install the Lionel-MTH Command Control Bridge
+Comment[en_US]=Install the Lionel-MTH Command Control Bridge
+Exec=bash -c 'cd "$(dirname "%k")" && bash gui_install.sh'
+Icon=system-software-install
+Terminal=false
+Categories=Utility;System;
+StartupNotify=true
