@@ -106,7 +106,7 @@ The update will:\n\
   • Refresh Python dependencies\n\
   • Restart the bridge service\n\n\
 You may be asked for your administrator password.\n\n\
-Click OK to continue." \
+Click Yes to continue." \
     --width=500 2>/dev/null || exit 0
 
 # --- Check for download tools ---

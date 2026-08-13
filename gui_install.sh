@@ -237,7 +237,7 @@ fi
 CONFIRM_TEXT="$CONFIRM_TEXT\n\n\
 You may be asked for your administrator password next.\n\
 This is needed to install the system service.\n\n\
-Click OK to begin installation."
+Click Yes to begin installation."
 
 zenity --question \
     --title="Step 5 of 5: Confirm" \
