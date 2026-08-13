@@ -1778,6 +1778,86 @@ class StatusHTTPHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+class SerialTcpProxy:
+    """TCP server that shares serial data from the Base 3 with PyTrain, JMRI, etc.
+    Listens on a port (default 5111) and broadcasts raw serial bytes to all connected clients.
+    socat on the client side bridges this to a virtual serial port (e.g. /dev/ttyS101)."""
+
+    def __init__(self, bridge, port=5111):
+        self.bridge = bridge
+        self.port = port
+        self.clients = []
+        self.clients_lock = threading.Lock()
+        self.server = None
+        self.thread = None
+        self.running = False
+
+    def start(self):
+        """Start the TCP server in a background thread."""
+        self.running = True
+        try:
+            self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server.bind(('0.0.0.0', self.port))
+            self.server.listen(5)
+            self.server.settimeout(1.0)
+            self.thread = threading.Thread(target=self._accept_loop, daemon=True)
+            self.thread.start()
+            logger.info(f"📡 Serial TCP proxy listening on port {self.port}")
+        except Exception as e:
+            logger.error(f"❌ Failed to start serial TCP proxy on port {self.port}: {e}")
+            self.running = False
+
+    def stop(self):
+        """Stop the TCP server and disconnect all clients."""
+        self.running = False
+        with self.clients_lock:
+            for client in self.clients:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+            self.clients.clear()
+        if self.server:
+            try:
+                self.server.close()
+            except Exception:
+                pass
+        if self.thread:
+            self.thread.join(timeout=3)
+        logger.info("📡 Serial TCP proxy stopped")
+
+    def broadcast(self, data):
+        """Send data to all connected clients. Disconnects clients that fail."""
+        dead = []
+        with self.clients_lock:
+            for client in self.clients:
+                try:
+                    client.sendall(data)
+                except Exception:
+                    dead.append(client)
+            for d in dead:
+                try:
+                    d.close()
+                except Exception:
+                    pass
+                self.clients.remove(d)
+
+    def _accept_loop(self):
+        """Accept incoming connections in a loop."""
+        while self.running:
+            try:
+                client, addr = self.server.accept()
+                client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                with self.clients_lock:
+                    self.clients.append(client)
+                logger.info(f"📡 Serial TCP proxy: client connected from {addr[0]}:{addr[1]}")
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+
 class LionelMTHBridge:
     def __init__(self):
         # Load configuration
