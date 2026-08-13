@@ -2208,10 +2208,52 @@ class SerialTcpProxy:
                 with self.clients_lock:
                     self.clients.append(client)
                 logger.info(f"📡 Serial TCP proxy: client connected from {addr[0]}:{addr[1]}")
+                # Start a thread to handle incoming data from this client (JMRI → SER2)
+                client_thread = threading.Thread(
+                    target=self._handle_client,
+                    args=(client, addr),
+                    daemon=True
+                )
+                client_thread.start()
             except socket.timeout:
                 continue
             except OSError:
                 break
+
+    def _handle_client(self, client_socket, addr):
+        """Handle incoming data from a client - forward to SER2.
+
+        This allows JMRI (via socat) to send commands (e.g. switch throws)
+        through the TCP proxy to the physical SER2 serial port.
+        """
+        try:
+            client_socket.settimeout(1.0)
+            while self.running:
+                try:
+                    data = client_socket.recv(1024)
+                    if not data:
+                        break  # Client disconnected
+                    # Forward data to SER2
+                    if self.bridge.lionel_serial and self.bridge.lionel_serial.is_open:
+                        with self.bridge.lionel_lock:
+                            self.bridge.lionel_serial.write(data)
+                            logger.debug(f"📡 TCP->SER2: {len(data)} bytes from {addr[0]}:{addr[1]}")
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    logger.error(f"📡 TCP client recv error: {e}")
+                    break
+        except Exception as e:
+            logger.error(f"📡 TCP client handler error: {e}")
+        finally:
+            with self.clients_lock:
+                if client_socket in self.clients:
+                    self.clients.remove(client_socket)
+            try:
+                client_socket.close()
+            except Exception:
+                pass
+            logger.info(f"📡 Serial TCP proxy: client disconnected from {addr[0]}:{addr[1]}")
 
 
 class LionelMTHBridge:
