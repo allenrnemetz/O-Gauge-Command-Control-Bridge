@@ -79,13 +79,14 @@ async def async_setup_entry(
     coordinator._known_mth_ids = set()
     coordinator._engine_device_info = device_info
     coordinator._async_add_engine_entities = async_add_entities
+    coordinator._engine_entity_registry = None
 
     # Add initial engine sensors
     _async_add_engine_sensors(coordinator)
 
-    # Register a listener so new engines get sensors as they're discovered
+    # Register a listener so new engines get sensors and stale ones are removed
     coordinator.async_add_listener(
-        lambda: _async_add_engine_sensors(coordinator)
+        lambda: _async_update_engine_sensors(coordinator, hass, entry)
     )
 
 
@@ -131,6 +132,56 @@ def _async_add_engine_sensors(
 
     if entities:
         coordinator._async_add_engine_entities(entities)
+
+
+@callback
+def _async_update_engine_sensors(
+    coordinator: LionelMthBridgeCoordinator,
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> None:
+    """Add new engine sensors and remove sensors for engines no longer present.
+
+    Called on every coordinator update. Adds sensors for newly discovered
+    engines and removes entities for engines that are no longer reported
+    by the bridge.
+    """
+    data = coordinator.data
+    if not data:
+        return
+
+    # First, add any new engine sensors
+    _async_add_engine_sensors(coordinator)
+
+    # Build set of current Lionel engine IDs from bridge data
+    current_lionel_ids = {
+        eng["tmcc_id"] for eng in data.get("lionel_engines", [])
+        if eng.get("tmcc_id") is not None
+    }
+
+    # Find stale Lionel IDs (we created sensors for them before, but Base 3 no longer reports them)
+    # Only Lionel entries are cleaned up — HA should always match the Base 3 library.
+    # MTH entries are kept even when stale so the user can rename them and maintain
+    # the library even when engines aren't on the track.
+    stale_lionel = coordinator._known_lionel_ids - current_lionel_ids
+
+    if not stale_lionel:
+        return
+
+    # Remove stale Lionel entities via the entity registry
+    from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
+
+    entity_registry = async_get_entity_registry(hass)
+    host = coordinator.host
+    port = coordinator.port
+
+    for tmcc_id in stale_lionel:
+        unique_id = f"{host}:{port}_lionel_engine_{tmcc_id}"
+        entity_id = entity_registry.async_get_entity_id("sensor", DOMAIN, unique_id)
+        if entity_id:
+            entity_registry.async_remove(entity_id)
+            _LOGGER.info("Removed stale Lionel engine sensor #%d (entity: %s)", tmcc_id, entity_id)
+        coordinator._known_lionel_ids.discard(tmcc_id)
 
 
 class BridgeBinarySensorBase(CoordinatorEntity, BinarySensorEntity):
