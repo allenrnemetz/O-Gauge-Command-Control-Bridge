@@ -3165,7 +3165,15 @@ class LionelMTHBridge:
             
             if new_available_engines:
                 logger.info(f"✅ Found {len(new_available_engines)} MTH engines: {new_available_engines}")
-                
+
+                # Clean up discovered mappings for engines no longer present
+                with self.engine_data_lock:
+                    stale = [k for k, v in self.discovered_mth_engines.items()
+                             if v not in new_available_engines and k not in self.engine_mappings]
+                    for k in stale:
+                        old_mth = self.discovered_mth_engines.pop(k)
+                        logger.info(f"🔗 Removed stale mapping Lionel #{k} → MTH #{old_mth}")
+
                 # Merge new engines with existing - update mapping if engine changed
                 for mth_engine in new_available_engines:
                     lionel_addr = mth_engine - 1
@@ -3189,11 +3197,11 @@ class LionelMTHBridge:
                             self.discovered_mth_engines[str(lionel_addr)] = mth_engine
                             logger.info(f"🔗 Auto-mapped Lionel #{lionel_addr} → MTH #{mth_engine}")
                 
-                # Merge available engines list (don't replace, add new ones)
+                # Replace available engines list with what I0 actually found.
+                # Merging with old persisted data causes stale engines (e.g. 6, 11)
+                # to persist forever even after they're removed from the WTIU.
                 with self.engine_data_lock:
-                    for eng in new_available_engines:
-                        if eng not in self.available_mth_engines:
-                            self.available_mth_engines.append(eng)
+                    self.available_mth_engines = list(new_available_engines)
                     engines_to_query = list(self.available_mth_engines)
 
                 # Query capabilities for each engine (also gets engine names)
