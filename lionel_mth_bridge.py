@@ -708,6 +708,114 @@ class LegacyProtocolParser:
             'protocol': 'legacy_train'
         }
 
+class CalibrationCurveManager:
+    """Load speed-trap calibration curves and convert Lionel speed steps to DCS sMPH.
+
+    Curves are global (per speed-step scale, not per engine). The manager scans
+    ~/.lionel-mth-bridge/calibration/ for:
+      curve_legacy_*.json  -> Legacy/TMCC2 200-step -> DCS sMPH
+      curve_tmcc1_*.json   -> TMCC1 32-step        -> DCS sMPH
+    If multiple files match a protocol, the most recently modified one wins.
+    Falls back to the original linear formulas when no curve is present.
+    """
+
+    CALIBRATION_DIR = os.path.join(os.path.expanduser("~/.lionel-mth-bridge"), "calibration")
+
+    def __init__(self):
+        self.legacy_curve = None      # sorted list of (step, dcs_smpH)
+        self.legacy_source = None     # filename loaded
+        self.tmcc1_curve = None
+        self.tmcc1_source = None
+        self._load_curves()
+
+    def _load_curves(self):
+        """Scan calibration directory and load the newest curve per protocol."""
+        try:
+            if not os.path.isdir(self.CALIBRATION_DIR):
+                logger.info(f"📐 Calibration dir not found ({self.CALIBRATION_DIR}) - using linear speed conversion")
+                return
+        except Exception as e:
+            logger.warning(f"⚠️ Calibration dir check failed: {e}")
+            return
+
+        self.legacy_curve, self.legacy_source = self._load_newest("curve_legacy_*.json")
+        self.tmcc1_curve, self.tmcc1_source = self._load_newest("curve_tmcc1_*.json")
+
+        if self.legacy_curve:
+            logger.info(f"📐 Loaded Legacy calibration curve from {self.legacy_source} ({len(self.legacy_curve)} points)")
+        else:
+            logger.info("📐 No Legacy calibration curve found - using linear conversion")
+        if self.tmcc1_curve:
+            logger.info(f"📐 Loaded TMCC1 calibration curve from {self.tmcc1_source} ({len(self.tmcc1_curve)} points)")
+        else:
+            logger.info("📐 No TMCC1 calibration curve found - using linear conversion")
+
+    def _load_newest(self, pattern):
+        """Return (sorted_points, filename) for the newest file matching pattern, or (None, None)."""
+        matches = glob.glob(os.path.join(self.CALIBRATION_DIR, pattern))
+        if not matches:
+            return None, None
+        newest = max(matches, key=os.path.getmtime)
+        try:
+            with open(newest, 'r') as f:
+                data = json.load(f)
+            curve = data.get('curve', [])
+            if not curve:
+                logger.warning(f"⚠️ Calibration curve {newest} has no 'curve' array")
+                return None, None
+            points = sorted(
+                [(float(p['step']), float(p['dcs_smpH'])) for p in curve],
+                key=lambda x: x[0]
+            )
+            return points, os.path.basename(newest)
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load calibration curve {newest}: {e}")
+            return None, None
+
+    @staticmethod
+    def _interpolate(points, step):
+        """Linear interpolation over sorted (step, dcs) points."""
+        if step <= 0:
+            return 0
+        if step <= points[0][0]:
+            # Below first point: extrapolate from origin using first segment slope
+            s0, d0 = points[0]
+            if s0 <= 0:
+                return int(round(d0))
+            return max(0, int(round(step * d0 / s0)))
+        if step >= points[-1][0]:
+            return max(0, min(120, int(round(points[-1][1]))))
+        for i in range(1, len(points)):
+            s1, d1 = points[i]
+            if step <= s1:
+                s0, d0 = points[i - 1]
+                if s1 == s0:
+                    return int(round(d1))
+                frac = (step - s0) / (s1 - s0)
+                return max(0, min(120, int(round(d0 + frac * (d1 - d0)))))
+        return max(0, min(120, int(round(points[-1][1]))))
+
+    def convert_legacy_to_dcs(self, legacy_step):
+        """Convert Legacy/TMCC2 200-step (0-199) to DCS sMPH (0-120)."""
+        if legacy_step <= 0:
+            return 0
+        if legacy_step >= 199:
+            return 120
+        if self.legacy_curve:
+            return self._interpolate(self.legacy_curve, legacy_step)
+        # Linear fallback
+        return max(0, min(120, int(round(legacy_step * 120.0 / 199.0))))
+
+    def convert_tmcc1_to_dcs(self, tmcc1_step):
+        """Convert TMCC1 32-step (0-31) to DCS sMPH (0-120)."""
+        if tmcc1_step <= 0:
+            return 0
+        if self.tmcc1_curve:
+            return self._interpolate(self.tmcc1_curve, tmcc1_step)
+        # Linear fallback
+        return max(0, min(120, int(round(tmcc1_step * 120.0 / 31.0))))
+
+
 class LegacySpeedManager:
     """Manage 200-step Legacy speed with fine-grained control"""
     def __init__(self):
@@ -715,6 +823,7 @@ class LegacySpeedManager:
         self.legacy_directions = {}
         self.last_speed_update = {}
         self.speed_resolution = 200  # Legacy has 200 steps!
+        self.curve_manager = None  # Set by bridge to CalibrationCurveManager
         
     def set_legacy_speed(self, engine, legacy_speed):
         """Set Legacy speed (0-199) and convert to DCS (0-120)"""
@@ -734,27 +843,19 @@ class LegacySpeedManager:
         return None
     
     def convert_legacy_to_dcs(self, legacy_speed):
-        """Convert Legacy 0-199 to DCS 0-120 sMPH with optimized mapping
-        
-        Legacy: 0-199 (200 steps) - finer resolution
-        DCS:    0-120 sMPH (121 steps) - scale miles per hour
-        
-        Mapping strategy:
-        - Linear mapping with rounding for best precision
-        - Every ~1.65 Legacy steps = 1 DCS sMPH step
-        - Preserves full range: Legacy 0 = DCS 0, Legacy 199 = DCS 120
+        """Convert Legacy 0-199 to DCS 0-120 sMPH.
+
+        Uses the calibration curve from the speed trap when available; falls
+        back to linear mapping otherwise.
         """
         if legacy_speed <= 0:
             return 0
         if legacy_speed >= 199:
             return 120
-            
-        # Direct linear mapping with proper rounding
-        # Formula: dcs = round(legacy * 120 / 199)
-        dcs_speed = round(legacy_speed * 120.0 / 199.0)
-        
-        # Ensure within bounds
-        return max(0, min(120, int(dcs_speed)))
+        if self.curve_manager:
+            return self.curve_manager.convert_legacy_to_dcs(legacy_speed)
+        # Linear fallback
+        return max(0, min(120, int(round(legacy_speed * 120.0 / 199.0))))
     
     def get_current_speed(self, engine):
         """Get current speed in both Legacy and DCS scales"""
@@ -2444,6 +2545,8 @@ class LionelMTHBridge:
         # Legacy protocol support
         self.legacy_parser = LegacyProtocolParser(self)
         self.legacy_speed_manager = LegacySpeedManager()
+        self.calibration_curves = CalibrationCurveManager()
+        self.legacy_speed_manager.curve_manager = self.calibration_curves
         self.protocol_mode = 'auto'  # 'tmcc1', 'legacy', or 'auto'
         self.legacy_enabled = True
         
@@ -3357,15 +3460,15 @@ class LionelMTHBridge:
                 current_tmcc = self._engine_tmcc_speed.get(engine, 0)
                 new_tmcc = max(0, min(31, current_tmcc + change))
                 self._engine_tmcc_speed[engine] = new_tmcc
-                # Convert TMCC1 (0-31) to MTH (0-120): each step = ~3.87 sMPH
-                dcs_speed = int(new_tmcc * 120 / 31)
+                # Convert TMCC1 (0-31) to MTH (0-120) using calibration curve if available
+                dcs_speed = self.calibration_curves.convert_tmcc1_to_dcs(new_tmcc)
                 logger.info(f"🎚️ Engine {engine} dial: TMCC {current_tmcc}+{change}={new_tmcc} -> MTH {dcs_speed}")
                 return self.send_wtiu_command(f's{dcs_speed}')
             
             # Legacy absolute 32-step speed
             elif command.get('type') == 'speed' and command.get('absolute') and command.get('scale') == '32_step':
                 speed = command.get('value', 0)
-                dcs_speed = int(speed * 120 / 31)
+                dcs_speed = self.calibration_curves.convert_tmcc1_to_dcs(speed)
                 return self.send_wtiu_command(f's{dcs_speed}')
             
             # Legacy RailSounds triggers
@@ -4576,8 +4679,8 @@ class LionelMTHBridge:
         # Speed commands: 0x000-0x0C7 (0-199) - Cab 3 sends these as absolute speed
         if cmd_code <= 0x0C7:
             legacy_speed = cmd_code
-            # Convert Legacy 200-step to DCS 120-step
-            dcs_speed = int(legacy_speed * 120 / 199)
+            # Convert Legacy 200-step to DCS 120-step (calibration curve if available)
+            dcs_speed = self.calibration_curves.convert_legacy_to_dcs(legacy_speed)
             # Also sync TMCC1 tracker (0-31) for Cab 1L dial consistency
             # TMCC1 = Legacy * 31 / 199
             tmcc_speed = int(legacy_speed * 31 / 199)
@@ -4698,8 +4801,8 @@ class LionelMTHBridge:
                 self._lashup_tmcc_speed[train_id] = new_tmcc_speed
                 
                 # Convert TMCC1 speed (0-31) to MTH DCS speed (0-120)
-                # Each TMCC step = ~3.87 MTH sMPH
-                new_mth_speed = int(new_tmcc_speed * 120 / 31)
+                # Uses calibration curve if available, otherwise linear
+                new_mth_speed = self.calibration_curves.convert_tmcc1_to_dcs(new_tmcc_speed)
                 self._lashup_current_speed[train_id] = new_mth_speed
                 
                 direction = "up" if speed_delta > 0 else "down"
@@ -5457,9 +5560,9 @@ class LionelMTHBridge:
             # Update tracked speed for this engine
             self.engine_speeds[self.current_lionel_engine] = new_speed
             
-            # Convert 0-31 to 0-120 (scale factor ~3.87)
+            # Convert 0-31 to 0-120 using calibration curve if available
             logger.info(f"🔧 DEBUG: Engine {self.current_lionel_engine} speed {current_speed} + {speed_value} = {new_speed}")
-            dcs_speed = int(new_speed * 120 / 31)
+            dcs_speed = self.calibration_curves.convert_tmcc1_to_dcs(new_speed)
             dcs_speed = max(0, min(120, dcs_speed))  # Clamp to 0-120
             logger.info(f"🔧 DEBUG: Converted to DCS speed {dcs_speed}")
             return f"s{dcs_speed}"
