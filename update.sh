@@ -88,6 +88,20 @@ with open(config_path, 'w') as f:
     fi
 fi
 
+# Deploy calibration curves (speed-trap conversion curves for speed matching)
+CONFIG_DIR="$HOME/.lionel-mth-bridge"
+if [ -d "calibration" ]; then
+    echo "📐 Deploying speed calibration curves..."
+    mkdir -p "$CONFIG_DIR/calibration"
+    cp calibration/curve_*.json "$CONFIG_DIR/calibration/" 2>/dev/null || true
+    CURVE_COUNT=$(ls -1 "$CONFIG_DIR/calibration"/curve_*.json 2>/dev/null | wc -l)
+    if [ "$CURVE_COUNT" -gt 0 ]; then
+        echo "   ✅ Deployed $CURVE_COUNT calibration curve(s)"
+    else
+        echo "   ⚠️ No calibration curve files found in repository"
+    fi
+fi
+
 # Install log cleanup cron job if not already present (added in v1.4)
 CRON_SCRIPT="/etc/cron.daily/lionel-mth-bridge-log-cleanup"
 if [ ! -f "$CRON_SCRIPT" ]; then

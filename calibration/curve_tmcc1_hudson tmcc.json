@@ -1,0 +1,70 @@
+{
+  "engine_name": "hudson tmcc",
+  "protocol": "tmcc1",
+  "type": "conversion_curve",
+  "curve": [
+    {
+      "step": 1,
+      "actual_smpH": 1.9,
+      "dcs_smpH": 2
+    },
+    {
+      "step": 2,
+      "actual_smpH": 2.7,
+      "dcs_smpH": 3
+    },
+    {
+      "step": 3,
+      "actual_smpH": 4.2,
+      "dcs_smpH": 4
+    },
+    {
+      "step": 5,
+      "actual_smpH": 6.8,
+      "dcs_smpH": 7
+    },
+    {
+      "step": 7,
+      "actual_smpH": 10.9,
+      "dcs_smpH": 11
+    },
+    {
+      "step": 9,
+      "actual_smpH": 15.1,
+      "dcs_smpH": 15
+    },
+    {
+      "step": 11,
+      "actual_smpH": 21.2,
+      "dcs_smpH": 21
+    },
+    {
+      "step": 14,
+      "actual_smpH": 29.2,
+      "dcs_smpH": 29
+    },
+    {
+      "step": 16,
+      "actual_smpH": 37.5,
+      "dcs_smpH": 38
+    },
+    {
+      "step": 21,
+      "actual_smpH": 62.5,
+      "dcs_smpH": 62
+    },
+    {
+      "step": 26,
+      "actual_smpH": 82.0,
+      "dcs_smpH": 82
+    },
+    {
+      "step": 31,
+      "actual_smpH": 109.4,
+      "dcs_smpH": 109
+    }
+  ],
+  "spacing_mm": 306.4,
+  "source_sweep": "tmcc1_hudson tmcc.json",
+  "timestamp": "2026-08-14 17:40:49"
+}

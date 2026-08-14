@@ -1,0 +1,80 @@
+{
+  "engine_name": "hudson",
+  "protocol": "legacy",
+  "type": "conversion_curve",
+  "curve": [
+    {
+      "step": 1,
+      "actual_smpH": 1.8,
+      "dcs_smpH": 2
+    },
+    {
+      "step": 4,
+      "actual_smpH": 2.3,
+      "dcs_smpH": 2
+    },
+    {
+      "step": 8,
+      "actual_smpH": 3.0,
+      "dcs_smpH": 3
+    },
+    {
+      "step": 12,
+      "actual_smpH": 4.0,
+      "dcs_smpH": 4
+    },
+    {
+      "step": 17,
+      "actual_smpH": 5.0,
+      "dcs_smpH": 5
+    },
+    {
+      "step": 25,
+      "actual_smpH": 7.2,
+      "dcs_smpH": 7
+    },
+    {
+      "step": 34,
+      "actual_smpH": 9.7,
+      "dcs_smpH": 10
+    },
+    {
+      "step": 42,
+      "actual_smpH": 13.0,
+      "dcs_smpH": 13
+    },
+    {
+      "step": 50,
+      "actual_smpH": 15.8,
+      "dcs_smpH": 16
+    },
+    {
+      "step": 67,
+      "actual_smpH": 23.5,
+      "dcs_smpH": 24
+    },
+    {
+      "step": 100,
+      "actual_smpH": 45.2,
+      "dcs_smpH": 45
+    },
+    {
+      "step": 134,
+      "actual_smpH": 72.9,
+      "dcs_smpH": 73
+    },
+    {
+      "step": 167,
+      "actual_smpH": 101.2,
+      "dcs_smpH": 101
+    },
+    {
+      "step": 199,
+      "actual_smpH": 131.0,
+      "dcs_smpH": 120
+    }
+  ],
+  "spacing_mm": 306.4,
+  "source_sweep": "legacy_hudson.json",
+  "timestamp": "2026-08-14 17:40:01"
+}

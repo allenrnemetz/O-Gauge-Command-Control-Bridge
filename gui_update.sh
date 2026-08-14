@@ -243,6 +243,12 @@ DESKTOPEOF
         cp -r "$EXTRACTED_DIR/custom_components" "$INSTALL_DIR/" 2>/dev/null || true
     fi
 
+    # Copy calibration curves directory if it exists
+    if [ -d "$EXTRACTED_DIR/calibration" ]; then
+        rm -rf "$INSTALL_DIR/calibration" 2>/dev/null || true
+        cp -r "$EXTRACTED_DIR/calibration" "$INSTALL_DIR/" 2>/dev/null || true
+    fi
+
     # Don't overwrite the user's bridge_config.json in the install dir —
     # the real config lives in ~/.lionel-mth-bridge/bridge_config.json
     # which is never touched by the update.
@@ -303,6 +309,12 @@ journalctl --vacuum-time=30d --quiet 2>/dev/null || true
 find "$HOME/lionel-mth-bridge/logs" -name "*.log" -mtime +30 -delete 2>/dev/null || true
 CRONEOF
         sudo -A chmod +x "$CRON_SCRIPT" 2>/dev/null || true
+    fi
+
+    echo "# Deploying calibration curves..." >&2
+    if [ -d "$INSTALL_DIR/calibration" ]; then
+        mkdir -p "$HOME/.lionel-mth-bridge/calibration"
+        cp "$INSTALL_DIR/calibration"/curve_*.json "$HOME/.lionel-mth-bridge/calibration/" 2>/dev/null || true
     fi
 
     echo "# Restarting bridge service..." >&2

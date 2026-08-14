@@ -169,6 +169,11 @@ DESKTOPEOF
         cp -r "$CURRENT_DIR/custom_components" "$INSTALL_DIR/" 2>/dev/null || true
     fi
 
+    # Copy calibration curves directory if it exists
+    if [ -d "$CURRENT_DIR/calibration" ]; then
+        cp -r "$CURRENT_DIR/calibration" "$INSTALL_DIR/" 2>/dev/null || true
+    fi
+
     # Copy hacs.json if it exists
     if [ -f "$CURRENT_DIR/hacs.json" ]; then
         cp "$CURRENT_DIR/hacs.json" "$INSTALL_DIR/" 2>/dev/null || true
@@ -203,6 +208,19 @@ if [ ! -f "$CONFIG_DIR/bridge_config.json" ]; then
     cp bridge_config.json "$CONFIG_DIR/bridge_config.json"
 else
     print_warning "Configuration already exists at $CONFIG_DIR/bridge_config.json"
+fi
+
+# Deploy calibration curves (speed-trap conversion curves for speed matching)
+if [ -d "calibration" ]; then
+    print_status "Deploying speed calibration curves..."
+    mkdir -p "$CONFIG_DIR/calibration"
+    cp calibration/curve_*.json "$CONFIG_DIR/calibration/" 2>/dev/null || true
+    CURVE_COUNT=$(ls -1 "$CONFIG_DIR/calibration"/curve_*.json 2>/dev/null | wc -l)
+    if [ "$CURVE_COUNT" -gt 0 ]; then
+        print_status "  Deployed $CURVE_COUNT calibration curve(s) to $CONFIG_DIR/calibration/"
+    else
+        print_warning "  No calibration curve files found in repository"
+    fi
 fi
 
 # MTH WTIU Configuration
