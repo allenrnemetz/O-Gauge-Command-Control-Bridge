@@ -20,6 +20,9 @@ __pycache__/
 # Test files (empty)
 test_lionel.py
 
+# Speed trap (local calibration tool, not part of the bridge)
+speed_trap_esp32/
+
 # OS files
 .DS_Store
 Thumbs.db
