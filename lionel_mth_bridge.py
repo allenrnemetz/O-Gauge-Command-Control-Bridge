@@ -598,7 +598,9 @@ class LegacyProtocolParser:
                     'value': speed,
                     'absolute': True,
                     'scale': '32_step',
-                    'protocol': 'legacy'
+                    'protocol': 'legacy',
+                    'is_train': True,
+                    'train_id': address
                 }
             logger.info(f"🔧 Legacy 32-step speed: {speed}/31 (ignoring - use 200-step instead)")
             # Don't send 32-step speed - Legacy should use 200-step
@@ -2692,6 +2694,14 @@ class LionelMTHBridge:
             command = self.parse_tmcc_packet(packet)
             if command:
                 command['protocol'] = 'tmcc1'
+                # Tag train commands so the main loop can route them to the
+                # lashup path instead of the single-engine path.
+                # TMCC1 bits 15-14: 00=Engine, 01=Train
+                cmd_type = (packet[1] >> 6) & 0x03
+                if cmd_type == 0x01:
+                    address_bits = ((packet[1] & 0x3F) << 1) | ((packet[2] & 0x80) >> 7)
+                    command['is_train'] = True
+                    command['train_id'] = address_bits
             return command
             
         return None
@@ -2723,22 +2733,34 @@ class LionelMTHBridge:
         
         # Extract address field (bits 13-7) from packet[1] and packet[2]
         address_bits = ((packet[1] & 0x3F) << 1) | ((packet[2] & 0x80) >> 7)
-        
+
         # Extract command field (bits 6-5) from packet[2]
         cmd_field = (packet[2] & 0x60) >> 5
-        
+
         # Extract data field (bits 4-0) from packet[2]
         data_field = packet[2] & 0x1F
-        
-        # Update current engine from address field if present
-        if address_bits > 0 and address_bits <= 99:
-            self.current_lionel_engine = address_bits
-            logger.info(f"🔧 Using engine from address field: {self.current_lionel_engine}")
-        elif self.current_lionel_engine == 0:
-            self.current_lionel_engine = 1  # Default to engine 1 if no engine selected
-        
-        # Debug logging
-        logger.info(f"🔍 TMCC Parse: address=0x{address_bits:02x}, cmd_field=0x{cmd_field:02x}, data_field=0x{data_field:02x}")
+
+        # Distinguish engine (cmd_type=00) from train (cmd_type=01) commands.
+        # Per the Lionel LCS Protocol Spec, TMCC1 uses bits 15-14 to select
+        # engine vs train. Train commands must be routed to the lashup path,
+        # not treated as single-engine commands.
+        is_train = (cmd_type == 0x01)
+
+        # Update current engine from address field if present.
+        # For train commands, do NOT set current_lionel_engine — the address
+        # is a TR ID, not an engine ID, and setting it would cause engine
+        # commands that share the same number to be misrouted.
+        if is_train:
+            logger.info(f"🔍 TMCC1 Train command: TR={address_bits}, cmd_field=0x{cmd_field:02x}, data_field=0x{data_field:02x}")
+        else:
+            if address_bits > 0 and address_bits <= 99:
+                self.current_lionel_engine = address_bits
+                logger.info(f"🔧 Using engine from address field: {self.current_lionel_engine}")
+            elif self.current_lionel_engine == 0:
+                self.current_lionel_engine = 1  # Default to engine 1 if no engine selected
+
+            # Debug logging
+            logger.info(f"🔍 TMCC Parse: address=0x{address_bits:02x}, cmd_field=0x{cmd_field:02x}, data_field=0x{data_field:02x}")
         
         # TMCC to MTH command mapping based on actual packets
         if cmd_field == 0x00:  # Engine/Train commands (binary 00)
@@ -4399,16 +4421,6 @@ class LionelMTHBridge:
             if engine is None:
                 engine = self.current_lionel_engine
 
-            # If this Lionel address is actually a TR (lashup) ID, redirect to the
-            # lashup command path instead of treating it as a single engine. Without
-            # this, any command type that doesn't explicitly check for lashups (boost/
-            # brake, momentum, coupler, direction, dial speed, etc.) would try to look
-            # up a nonexistent single-engine mapping for the TR ID and get dropped.
-            mth_lashup_id = self.lashup_manager.get_mth_id_for_tr(engine)
-            if mth_lashup_id:
-                logger.debug(f"🔀 Redirecting TR{engine} command '{command}' to MTH lashup {mth_lashup_id}")
-                return self.send_lashup_command(mth_lashup_id, command, engine)
-
             mth_engine = self.get_mth_engine(engine)
             if not mth_engine:
                 logger.warning(f"⚠️ Ignoring MTH command for unmapped Lionel engine #{engine}: {command}")
@@ -4627,13 +4639,22 @@ class LionelMTHBridge:
             # Position assignment commands (single/head/middle/rear) or assign_to_train
             # These come from engine commands (0xF8) with the engine being assigned
             engine = command.get('engine', 0)
-            if cmd_value in ('single_fwd', 'single_rev', 'head_fwd', 'head_rev', 
-                            'middle_fwd', 'middle_rev', 'rear_fwd', 'rear_rev', 
+            if cmd_value in ('single_fwd', 'single_rev', 'head_fwd', 'head_rev',
+                            'middle_fwd', 'middle_rev', 'rear_fwd', 'rear_rev',
                             'assign_to_train') and engine > 0:
-                # Engine is being assigned to a train - we need to find which train
-                # The train ID comes in a subsequent ASSIGN_TO_TRAIN command with the train number
-                # For now, just log it - the actual PDI query will be triggered by ASSIGN_TO_TRAIN
-                logger.info(f"🔗 Engine {engine} position assignment: {cmd_value}")
+                # Store the direction the engine was assigned to face in the consist.
+                # This is used later to send d0/d1 to the MTH engine before the
+                # first speed command, so it runs in the correct direction.
+                if not hasattr(self, '_consist_engine_direction'):
+                    self._consist_engine_direction = {}  # {engine_id: 0=fwd, 1=rev}
+                if cmd_value.endswith('_rev'):
+                    self._consist_engine_direction[engine] = 1
+                    logger.info(f"🔗 Engine {engine} position assignment: {cmd_value} (REVERSE)")
+                elif cmd_value.endswith('_fwd'):
+                    self._consist_engine_direction[engine] = 0
+                    logger.info(f"🔗 Engine {engine} position assignment: {cmd_value} (FORWARD)")
+                else:
+                    logger.info(f"🔗 Engine {engine} position assignment: {cmd_value}")
                 return True
             
             return True
@@ -4679,6 +4700,46 @@ class LionelMTHBridge:
         # Speed commands: 0x000-0x0C7 (0-199) - Cab 3 sends these as absolute speed
         if cmd_code <= 0x0C7:
             legacy_speed = cmd_code
+
+            # Ensure the lashup has a direction set before sending speed.
+            # The Base 3 may send speed without an explicit direction command,
+            # and MTH engines default to whatever direction they were last in.
+            # Use the direction from the consist assignment (single_fwd, head_rev, etc.)
+            # if available; otherwise default to forward.
+            if not hasattr(self, '_lashup_direction_states'):
+                self._lashup_direction_states = {}
+            if train_id not in self._lashup_direction_states:
+                direction = 0  # Default forward
+                consist_dir = getattr(self, '_consist_engine_direction', {})
+
+                # Gather all Lionel engine IDs associated with this TR.
+                # For multi-engine lashups, lashup_engines is populated.
+                # For single-engine TRs, check pending_consist_engines and
+                # the reverse MTH→Lionel mapping.
+                candidate_engines = set(self.lashup_manager.lashup_engines.get(train_id, []))
+                pending = getattr(self, '_pending_consist_engines', {}).get(train_id, {})
+                candidate_engines.update(pending.keys())
+                # Also check MTH engines in lashup — strip direction bit and
+                # reverse-map to Lionel IDs
+                for mth_id_with_dir in self.lashup_manager.mth_engines_in_lashup.get(train_id, []):
+                    mth_id_clean = mth_id_with_dir & 0x7F
+                    for lionel_id, mapped_mth in self.discovered_mth_engines.items():
+                        if mapped_mth == mth_id_clean:
+                            candidate_engines.add(int(lionel_id))
+
+                for eng in candidate_engines:
+                    if eng in consist_dir:
+                        direction = consist_dir[eng]
+                        logger.info(f"🚂 TR{train_id} direction from consist: engine {eng} -> {'REV' if direction else 'FWD'}")
+                        break
+                else:
+                    logger.info(f"🚂 TR{train_id} no consist direction found — defaulting to FWD")
+                if direction == 0:
+                    self.send_lashup_command(mth_id, "d0", train_id)
+                else:
+                    self.send_lashup_command(mth_id, "d1", train_id)
+                self._lashup_direction_states[train_id] = direction
+
             # Convert Legacy 200-step to DCS 120-step (calibration curve if available)
             dcs_speed = self.calibration_curves.convert_legacy_to_dcs(legacy_speed)
             # Also sync TMCC1 tracker (0-31) for Cab 1L dial consistency
@@ -5750,7 +5811,27 @@ class LionelMTHBridge:
                                     if self.handle_lashup_command(command):
                                         logger.info("🔗 Lashup command handled")
                                         continue
-                                    
+
+                                    # Train commands (TMCC1 cmd_type=01 or Legacy 32-step
+                                    # TR speed) must go to the lashup, not the single-engine path.
+                                    if command.get('is_train'):
+                                        train_id = command.get('train_id', 0)
+                                        mth_id = self.lashup_manager.get_mth_id_for_tr(train_id)
+                                        if mth_id:
+                                            # Legacy 32-step absolute speed for TRs 1-9
+                                            if command.get('type') == 'speed' and command.get('absolute') and command.get('scale') == '32_step':
+                                                dcs_speed = self.calibration_curves.convert_tmcc1_to_dcs(command.get('value', 0))
+                                                mth_cmd = f's{dcs_speed}'
+                                            else:
+                                                mth_cmd = self.convert_to_mth_protocol(command)
+                                            if mth_cmd:
+                                                logger.info(f"🔗 TR{train_id} -> MTH lashup {mth_id}: {mth_cmd}")
+                                                self.send_lashup_command(mth_id, mth_cmd, train_id)
+                                            continue
+                                        else:
+                                            logger.debug(f"🔗 TR{train_id} has no MTH lashup, ignoring")
+                                            continue
+
                                     # Use Legacy-aware sending for Legacy commands
                                     if protocol in ('legacy', 'legacy_train'):
                                         if self.send_to_mth_with_legacy(command):
@@ -5981,7 +6062,15 @@ class LionelMTHBridge:
             
             # Use lashup manager to create the lashup
             self.lashup_manager.update_lashup(train_id, components)
-            
+
+            # Store per-engine direction from consist assignment so the
+            # lashup speed handler can send d0/d1 before the first speed.
+            if not hasattr(self, '_consist_engine_direction'):
+                self._consist_engine_direction = {}
+            for comp in components:
+                self._consist_engine_direction[comp.tmcc_id] = 1 if comp.is_reversed else 0
+                logger.info(f"🔗 Stored consist direction for engine {comp.tmcc_id}: {'REV' if comp.is_reversed else 'FWD'}")
+
             # Clear pending engines for this train
             if train_id in self._pending_consist_engines:
                 del self._pending_consist_engines[train_id]
