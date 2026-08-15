@@ -5262,10 +5262,15 @@ class LionelMTHBridge:
                 dcs_engine = mth_engines[0] & 0x7F  # Strip reverse-direction bit
                 try:
                     with self.mth_lock:
-                        if dcs_engine != getattr(self, '_last_selected_engine', None):
-                            self.mth_socket.send(f"y{dcs_engine}\r\n".encode())
-                            self._last_selected_engine = dcs_engine
-                            time.sleep(0.05)
+                        # Always re-select the engine before each command.
+                        # The WTIU's RF link to the engine can degrade between
+                        # commands, causing bare commands (s0, s2, etc.) to be
+                        # lost with "DCS timeout". Re-selecting y<engine> each
+                        # time keeps the RF link alive, same as the multi-engine
+                        # lashup path which always sends y102 before each command.
+                        self.mth_socket.send(f"y{dcs_engine}\r\n".encode())
+                        self._last_selected_engine = dcs_engine
+                        time.sleep(0.05)
                         self.mth_socket.send(f"{mth_cmd}\r\n".encode('latin-1'))
                         logger.info(f"🚂 TR{train_id} (single MTH engine {dcs_engine}) -> {mth_cmd}")
                         self.mth_socket.settimeout(1.0)
