@@ -282,7 +282,10 @@ The daylight cycle smoothly transitions through morning → afternoon → sunset
 | **Brake** | Decrease speed | ✅ Verified |
 | **Momentum** | 0-7 levels mapped to MTH acceleration/deceleration | ✅ Verified |
 | **Marker Lights** | On/off translated to MTH markers | ✅ Verified |
-| **Strobe/Beacon** | On/off translated to MTH beacon | ✅ Verified |
+| **Strobe/Beacon** | On/off (single/double flash) translated to MTH beacon | ✅ Verified |
+| **Mars Light** | On/off translated to MTH Mars light | ✅ Verified |
+| **Cab/Interior Light** | On/off translated to MTH interior light | ✅ Verified |
+| **Ditch Lights** | Off/auto/on/flashing translated to MTH ditch lights | ✅ Verified |
 
 ### Engines Tested
 

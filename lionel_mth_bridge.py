@@ -24,6 +24,7 @@ import serial
 import socket
 import threading
 import time
+import signal
 import logging
 from collections import deque
 from threading import Lock
@@ -45,7 +46,6 @@ except Exception:
     WLEDController = None
 
 # Thunder sound player helper
-import subprocess
 
 def play_thunder(delay_ms: int, sound_dir: str = "/home/pi/sounds", audio_device: str = "plughw:2,0") -> None:
     """Play thunder sound after a delay (simulates distance from lightning).
@@ -70,7 +70,6 @@ def play_thunder(delay_ms: int, sound_dir: str = "/home/pi/sounds", audio_device
     very_distant_files = []
     
     try:
-        import os
         for f in os.listdir(sound_dir):
             if not f.lower().endswith('.wav'):
                 continue
@@ -160,6 +159,8 @@ class Config:
             "lionel_port": "/dev/ttyUSB0",
             "mth_host": "auto",
             "mth_port": "auto",
+            "base3_host": "auto",
+            "legacy_enabled": True,
             "debug": False,
             "log_level": "INFO",
             "engine_mappings": {},  # Empty for auto-discovery
@@ -175,6 +176,16 @@ class Config:
                 "host": "192.168.0.10",
                 "port": 80,
                 "pattern_presets": [1, 2, 3],
+                "daylight_cycle": True,
+                "cycle_duration_sec": 900,
+                "led_count": 318,
+                "moon_start": 0,
+                "moon_length": 5,
+                "lightning_every_n_cycles": 0,
+                "sound_dir": "/home/pi/sounds",
+                "audio_device": "plughw:2,0",
+                "thunder_enabled": False,
+                "off_on_startup": False,
                 # Mapping: {"<acc_address>": {"<data_field>": "action"}}
                 "mapping": {
                     "50": {
@@ -1240,10 +1251,9 @@ class Base3WiFiClient:
     def _scan_for_base3(timeout=0.3):
         """Scan local subnet for a device with port 50001 open (the Base 3).
         Returns IP address string or None."""
-        import socket as _socket
         try:
             # Get local IP
-            s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             local_ip = s.getsockname()[0]
             s.close()
@@ -1259,12 +1269,12 @@ class Base3WiFiClient:
 
         for ip in candidates:
             try:
-                with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as sock:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                     sock.settimeout(timeout)
                     sock.connect((ip, BASE3_WIFI_PORT))
                     logger.info(f"📡 Found Base 3 at {ip}:{BASE3_WIFI_PORT}")
                     return ip
-            except (_socket.timeout, ConnectionRefusedError, OSError):
+            except (socket.timeout, ConnectionRefusedError, OSError):
                 continue
         return None
 
@@ -2877,19 +2887,32 @@ class LionelMTHBridge:
                 
                 # Debounced - ignore repeat packets
                 return None
-            elif data_field == 0x1E:  # (11110) - Horn 2 / Secondary whistle
+            elif data_field == 0x1E:  # Let-Off Sound (11110)
+                logger.info(f"🔧 DEBUG: Let-off sound detected")
+                return {'type': 'function', 'value': 'letoff'}
+            elif data_field == 0x1F:  # Blow Horn Two (11111) - secondary horn
                 logger.info(f"🔧 DEBUG: Horn 2 / Secondary whistle detected")
                 return {'type': 'function', 'value': 'horn2'}
-            elif data_field == 0x1F:  # (11111) - Absolute speed 31 (max speed in TMCC1)
-                logger.info(f"🔧 DEBUG: Absolute speed 31 (max) detected")
-                return {'type': 'speed', 'value': 31, 'absolute': True}
-            
+
             # Direction commands
             elif data_field in [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6]:
                 return {'type': 'direction', 'value': 'forward'}
             elif data_field in [0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE]:
                 return {'type': 'direction', 'value': 'reverse'}
-                
+
+        elif cmd_field == 0x01:  # Momentum and other action commands (binary 01)
+            # TMCC1 momentum: 0x28=low, 0x29=medium, 0x2A=high
+            # In TMCC1 packet format: cmd_field=0x01, data_field=0x08/0x09/0x0A
+            if data_field == 0x08:  # Set Momentum Low
+                logger.info(f"🔧 DEBUG: TMCC1 Momentum Low detected")
+                return {'type': 'momentum', 'value': 'low'}
+            elif data_field == 0x09:  # Set Momentum Medium
+                logger.info(f"🔧 DEBUG: TMCC1 Momentum Medium detected")
+                return {'type': 'momentum', 'value': 'medium'}
+            elif data_field == 0x0A:  # Set Momentum High
+                logger.info(f"🔧 DEBUG: TMCC1 Momentum High detected")
+                return {'type': 'momentum', 'value': 'high'}
+
         elif cmd_field == 0x02:  # Relative speed commands (binary 10 - bit 6 set)
             if 0x00 <= data_field <= 0x1F:  # Relative speed D (0-31)
                 current_time = time.time()
@@ -2907,7 +2930,13 @@ class LionelMTHBridge:
                 else:
                     logger.info(f"🔧 DEBUG: Speed command debounced")
                     return None
-        
+
+        elif cmd_field == 0x03:  # Absolute speed commands (binary 11)
+            # TMCC1 absolute speed: data_field = 0-31 (direct speed step)
+            if 0x00 <= data_field <= 0x1F:
+                logger.info(f"🔧 DEBUG: Absolute speed {data_field} detected")
+                return {'type': 'speed', 'value': data_field, 'absolute': True}
+
         return None
     
     def process_legacy_speed_command(self, command):
@@ -3310,6 +3339,7 @@ class LionelMTHBridge:
 
             # Legacy lighting_direct commands from multi-word 0xFB packets
             # Translates Lionel lighting index 0x0D to MTH DCS equivalents
+            # value can be a single command string or a list of commands (ditch lights)
             elif command.get('type') == 'lighting_direct':
                 value = command.get('value')
                 engine = command.get('engine', self.current_lionel_engine)
@@ -3318,10 +3348,18 @@ class LionelMTHBridge:
                 mth_lashup_id = self.lashup_manager.get_mth_id_for_tr(engine)
                 if mth_lashup_id:
                     logger.info(f"💡 TR{engine} lighting {value} -> MTH lashup {mth_lashup_id}")
+                    if isinstance(value, list):
+                        for cmd in value:
+                            self.send_lashup_command(mth_lashup_id, cmd, engine)
+                        return True
                     return self.send_lashup_command(mth_lashup_id, value, engine)
 
                 # Single engine lighting control
                 logger.info(f"💡 Engine {engine} lighting -> {value}")
+                if isinstance(value, list):
+                    for cmd in value:
+                        self.send_wtiu_command(cmd)
+                    return True
                 return self.send_wtiu_command(value)
 
             # Legacy smoke commands - track state for cycling behavior
@@ -3510,10 +3548,11 @@ class LionelMTHBridge:
                 logger.info(f"🎚️ Engine {engine} dial: TMCC {current_tmcc}+{change}={new_tmcc} -> MTH {dcs_speed}")
                 return self.send_wtiu_command(f's{dcs_speed}')
             
-            # Legacy absolute 32-step speed
-            elif command.get('type') == 'speed' and command.get('absolute') and command.get('scale') == '32_step':
+            # Absolute 32-step speed (TMCC1 cmd_field=0x03 or Legacy 32-step)
+            elif command.get('type') == 'speed' and command.get('absolute'):
                 speed = command.get('value', 0)
                 dcs_speed = self.calibration_curves.convert_tmcc1_to_dcs(speed)
+                logger.info(f"🎚️ Absolute speed {speed} -> MTH {dcs_speed}")
                 return self.send_wtiu_command(f's{dcs_speed}')
             
             # Legacy RailSounds triggers
@@ -3664,7 +3703,6 @@ class LionelMTHBridge:
                 try:
                     # Extract hex data between "I0:" and " okay"
                     # Response format: "I0:00,00,00,00,00,00,00,00,00,00,00,04,20 okay"
-                    import re
                     hex_match = re.search(r'I0[:\s]*([\dA-Fa-f,]+)', response)
                     if hex_match:
                         hex_part = hex_match.group(1).strip()
@@ -4128,9 +4166,6 @@ class LionelMTHBridge:
     
     def connect_mth(self):
         """Connect to MTH WTIU via WiFi with mDNS discovery"""
-        import socket
-        from threading import Lock
-        
         self.mth_socket = None
         self.mth_connected = False
         
@@ -4439,7 +4474,7 @@ class LionelMTHBridge:
             if time_since_last < 0.1:  # Minimum 100ms between commands
                 time.sleep(0.1 - time_since_last)
             self._last_wtiu_command_time = time.time()
-            
+
             # Select engine if specified and different from last selected
             if engine is None:
                 engine = self.current_lionel_engine
@@ -4448,38 +4483,42 @@ class LionelMTHBridge:
             if not mth_engine:
                 logger.warning(f"⚠️ Ignoring MTH command for unmapped Lionel engine #{engine}: {command}")
                 return False
-            if mth_engine != getattr(self, '_last_selected_engine', None):
-                select_cmd = f"y{mth_engine}\r\n".encode()
-                self.mth_socket.send(select_cmd)
-                self._last_selected_engine = mth_engine
-                logger.info(f"🎯 Selected MTH engine {mth_engine}")
-                time.sleep(0.05)  # Brief delay after engine selection
-            
-            # Send command directly
-            full_command = f"{command}\r\n".encode()
-            self.mth_socket.send(full_command)
-            logger.info(f"🚂 Sent to WTIU: {command}")
-            
-            # Wait for response with timeout
-            self.mth_socket.settimeout(2.0)
-            try:
-                response = self.mth_socket.recv(256).decode('latin-1')
-                # Check for "->" prompt and extract response
-                if "->" in response:
-                    response = response.split("->")[0].strip()
-                logger.info(f"📥 WTIU response: {response}")
-                
-                # Return True if we got "okay" or any response (some commands don't return okay)
-                if response and response != "TIMEOUT":
-                    return True
-                else:
-                    return False
-                    
-            except socket.timeout:
-                logger.warning("⚠️ Command timeout (some commands don't return response)")
-                # Some commands like 'x' might not return immediately
-                return True  # Assume success for timeout
-                
+
+            # Acquire lock for the entire engine-select + send + receive sequence
+            # to prevent interleaved commands from other threads
+            with self.mth_lock:
+                if mth_engine != getattr(self, '_last_selected_engine', None):
+                    select_cmd = f"y{mth_engine}\r\n".encode()
+                    self.mth_socket.send(select_cmd)
+                    self._last_selected_engine = mth_engine
+                    logger.info(f"🎯 Selected MTH engine {mth_engine}")
+                    time.sleep(0.05)  # Brief delay after engine selection
+
+                # Send command directly
+                full_command = f"{command}\r\n".encode()
+                self.mth_socket.send(full_command)
+                logger.info(f"🚂 Sent to WTIU: {command}")
+
+                # Wait for response with timeout
+                self.mth_socket.settimeout(2.0)
+                try:
+                    response = self.mth_socket.recv(256).decode('latin-1')
+                    # Check for "->" prompt and extract response
+                    if "->" in response:
+                        response = response.split("->")[0].strip()
+                    logger.info(f"📥 WTIU response: {response}")
+
+                    # Return True if we got "okay" or any response (some commands don't return okay)
+                    if response and response != "TIMEOUT":
+                        return True
+                    else:
+                        return False
+
+                except socket.timeout:
+                    logger.warning("⚠️ Command timeout (some commands don't return response)")
+                    # Some commands like 'x' might not return immediately
+                    return True  # Assume success for timeout
+
         except Exception as e:
             logger.error(f"❌ Command send error: {e}")
             return False
@@ -4797,7 +4836,6 @@ class LionelMTHBridge:
             if not hasattr(self, '_lashup_direction_debounce'):
                 self._lashup_direction_debounce = {}
             
-            import time
             now = time.time()
             dir_key = f"dir_{train_id}"
             last_toggle = self._lashup_direction_debounce.get(dir_key, 0)
@@ -4884,7 +4922,6 @@ class LionelMTHBridge:
             # Cab 1L sends speed dial commands approximately every 100ms when dial is turned
             if not hasattr(self, '_lashup_speed_throttle'):
                 self._lashup_speed_throttle = {}
-            import time
             now = time.time()
             throttle_key = f"speed_{train_id}"
             last_send = self._lashup_speed_throttle.get(throttle_key, 0)
@@ -4972,7 +5009,6 @@ class LionelMTHBridge:
             
             # Check debounce - ignore if less than 2 seconds since last toggle
             # Cab 1L sends rapid repeated 0x11D commands when bell button is pressed
-            import time
             now = time.time()
             last_toggle = self._lashup_bell_debounce.get(bell_key, 0)
             if now - last_toggle < 2.0:
@@ -5003,7 +5039,6 @@ class LionelMTHBridge:
         # First press: u1 to start, subsequent presses: m24 to advance
         # After 60 seconds of inactivity: send u0 to end, then next press starts fresh with u1
         if cmd_code == 0x112:
-            import time
             current_time = time.time()
             
             # Use train_id for PFA state tracking in lashup mode
@@ -5049,7 +5084,6 @@ class LionelMTHBridge:
             return
         # 0x115 = Button 5 (Quick Shutdown) - debounce to prevent flooding
         if cmd_code == 0x115:
-            import time
             if not hasattr(self, '_lashup_shutdown_debounce'):
                 self._lashup_shutdown_debounce = {}
             last_shutdown = self._lashup_shutdown_debounce.get(train_id, 0)
@@ -5061,7 +5095,6 @@ class LionelMTHBridge:
             return
         # 0x109 = AUX1 (Quick Startup) - debounce to prevent flooding
         if cmd_code == 0x109:
-            import time
             if not hasattr(self, '_lashup_startup_debounce'):
                 self._lashup_startup_debounce = {}
             last_startup = self._lashup_startup_debounce.get(train_id, 0)
@@ -5112,7 +5145,6 @@ class LionelMTHBridge:
         # 0x10D = AUX2 (Headlight Toggle) - MTH uses ab1 (ON) / ab0 (OFF)
         if cmd_code == 0x10D:
             # Debounce: 500ms cooldown to prevent rapid toggling
-            import time
             current_time = time.time()
             if not hasattr(self, '_lashup_headlight_debounce'):
                 self._lashup_headlight_debounce = {}
@@ -5143,7 +5175,7 @@ class LionelMTHBridge:
             current_state = self._lashup_smoke_states.get(train_id, 0)  # 0=off, 1=low, 2=med, 3=high
             new_state = max(0, current_state - 1)
             self._lashup_smoke_states[train_id] = new_state
-            smoke_cmds = {0: 'abE', 1: 'ab12', 2: 'ab11'}  # off, min, med
+            smoke_cmds = {0: 'abE', 1: 'ab12', 2: 'ab11', 3: 'ab10'}  # off, min, med, max
             logger.info(f"🚂 TR{train_id} smoke down (btn 8) -> level {new_state} -> MTH lashup {mth_id}")
             self.send_lashup_command(mth_id, smoke_cmds.get(new_state, 'abE'), train_id)
             return
@@ -5154,9 +5186,9 @@ class LionelMTHBridge:
             current_state = self._lashup_smoke_states.get(train_id, 0)  # 0=off, 1=low, 2=med, 3=high
             new_state = min(3, current_state + 1)
             self._lashup_smoke_states[train_id] = new_state
-            smoke_cmds = {1: 'ab12', 2: 'ab11', 3: 'ab10'}  # min, med, max
+            smoke_cmds = {0: 'abE', 1: 'ab12', 2: 'ab11', 3: 'ab10'}  # off, min, med, max
             logger.info(f"🚂 TR{train_id} smoke up (btn 9) -> level {new_state} -> MTH lashup {mth_id}")
-            self.send_lashup_command(mth_id, smoke_cmds.get(new_state, 'abF'), train_id)
+            self.send_lashup_command(mth_id, smoke_cmds.get(new_state, 'abE'), train_id)
             return
         
         # Volume control (0x1B0-0x1BF) - master volume (from speed dial)
@@ -5170,7 +5202,6 @@ class LionelMTHBridge:
         
         # Startup/Shutdown sequences (from menu/extended) - use same debounce as quick startup
         if cmd_code == 0x1FB:  # Startup seq 1 (extended startup from menu)
-            import time
             if not hasattr(self, '_lashup_startup_debounce'):
                 self._lashup_startup_debounce = {}
             last_startup = self._lashup_startup_debounce.get(train_id, 0)
@@ -5183,7 +5214,6 @@ class LionelMTHBridge:
             self.send_lashup_command(mth_id, "u4", train_id)
             return
         if cmd_code == 0x1FC:  # Startup seq 2 (extended startup)
-            import time
             if not hasattr(self, '_lashup_startup_debounce'):
                 self._lashup_startup_debounce = {}
             last_startup = self._lashup_startup_debounce.get(train_id, 0)
@@ -5196,7 +5226,6 @@ class LionelMTHBridge:
             self.send_lashup_command(mth_id, "u6", train_id)
             return
         if cmd_code == 0x1FD:  # Shutdown seq 1 (from menu)
-            import time
             if not hasattr(self, '_lashup_shutdown_debounce'):
                 self._lashup_shutdown_debounce = {}
             last_shutdown = self._lashup_shutdown_debounce.get(train_id, 0)
@@ -5207,7 +5236,6 @@ class LionelMTHBridge:
             self.send_lashup_command(mth_id, "u5", train_id)
             return
         if cmd_code == 0x1FE:  # Shutdown seq 2 (extended shutdown)
-            import time
             if not hasattr(self, '_lashup_shutdown_debounce'):
                 self._lashup_shutdown_debounce = {}
             last_shutdown = self._lashup_shutdown_debounce.get(train_id, 0)
@@ -5535,7 +5563,8 @@ class LionelMTHBridge:
                 'whistle_pitch_2': 'w2',
                 'whistle_pitch_3': 'w2',
                 'whistle_pitch_4': 'w2',
-                'whistle_pitch_5': 'w2'
+                'whistle_pitch_5': 'w2',
+                'horn2': 'w2',  # Blow Horn Two → same whistle
             },
             'smoke': {
                 'on': 'abF',
@@ -5645,7 +5674,7 @@ class LionelMTHBridge:
                 if current_time - last_time < 0.5:  # 500ms debounce
                     return None  # Ignore repeated command
                 self._headlight_debounce_time[engine] = current_time
-                
+
                 if not hasattr(self, '_engine_headlight_state'):
                     self._engine_headlight_state = {}
                 current_state = self._engine_headlight_state.get(engine, True)  # Default ON
@@ -5654,6 +5683,26 @@ class LionelMTHBridge:
                 mth_cmd = "ab1" if new_state else "ab0"
                 logger.info(f"💡 Engine {engine} headlight {'ON' if new_state else 'OFF'}: {mth_cmd}")
                 return mth_cmd
+            elif cmd_type == 'function' and cmd_value == 'aux2_on':
+                # TMCC1 Aux2 On = Headlight ON
+                engine = self.current_lionel_engine
+                if not hasattr(self, '_engine_headlight_state'):
+                    self._engine_headlight_state = {}
+                self._engine_headlight_state[engine] = True
+                logger.info(f"💡 Engine {engine} headlight ON: ab1")
+                return "ab1"
+            elif cmd_type == 'function' and cmd_value == 'aux2_off':
+                # TMCC1 Aux2 Off = Headlight OFF
+                engine = self.current_lionel_engine
+                if not hasattr(self, '_engine_headlight_state'):
+                    self._engine_headlight_state = {}
+                self._engine_headlight_state[engine] = False
+                logger.info(f"💡 Engine {engine} headlight OFF: ab0")
+                return "ab0"
+            elif cmd_type == 'function' and cmd_value == 'aux2_option2':
+                # TMCC1 Aux2 Option 2 = Beacon toggle (matches Legacy aux2.option2)
+                logger.info(f"💡 Engine {self.current_lionel_engine} beacon toggle: abD")
+                return "abD"
             elif cmd_value in cmd_map[cmd_type]:
                 return cmd_map[cmd_type][cmd_value]
         
@@ -5987,23 +6036,43 @@ class LionelMTHBridge:
         # Lighting commands (param_index 0x0D)
         if param_index == 0x0D:
             # Lionel lighting → MTH DCS mapping (direct equivalents only)
-            # From Lionel LCS Protocol Spec v1.21 and MTH RTC source code
+            # Param data values from PyTrain multibyte_constants.py (Dave Swindell)
+            # MTH commands from RTC HotCommands.txt (Mark DiVecchio)
+            # Ditch light sequences from RTC Op_Control.cpp lines 2444-2464
             lighting_map = {
-                0x68: 'ab1D',  # Loco Marker Light Off  → MARKERS_OFF
-                0x69: 'ab1C',  # Loco Marker Light On   → MARKERS_ON
-                0x6C: 'ab1D',  # Tender Marker Light Off → MARKERS_OFF
-                0x6D: 'ab1C',  # Tender Marker Light On  → MARKERS_ON
-                0x78: 'abC',   # Strobe Light Off        → BEACON_OFF
-                0x79: 'abD',   # Strobe Light On, Single → BEACON_ON
-                0x7A: 'abD',   # Strobe Light On, Double → BEACON_ON
+                # Markers (FIXED: correct param data values + correct on/off direction)
+                0xC8: 'ab1C',  # Loco Marker Light Off   → MARKERS_OFF
+                0xC9: 'ab1D',  # Loco Marker Light On    → MARKERS_ON
+                0xCC: 'ab1C',  # Tender Marker Light Off → MARKERS_OFF
+                0xCD: 'ab1D',  # Tender Marker Light On  → MARKERS_ON
+                # Strobe/Beacon (FIXED: correct param data values)
+                0xE0: 'abC',   # Strobe Light Off        → BEACON_OFF
+                0xE1: 'abD',   # Strobe Light On, Single → BEACON_ON
+                0xE2: 'abD',   # Strobe Light On, Double → BEACON_ON
+                # Mars Light (NEW)
+                0xE8: 'ab4',   # Mars Light Off          → MARS_OFF
+                0xE9: 'ab5',   # Mars Light On           → MARS_ON
+                # Cab/Interior Light (NEW)
+                0xF0: 'ab2',   # Cab Light Off           → INTERIOR_OFF
+                0xF1: 'ab3',   # Cab Light On            → INTERIOR_ON
+                # Ditch Lights (NEW — 3 commands each per RTC Op_Control.cpp)
+                0xC0: ['ab6', 'ab8', 'abA'],   # Ditch Off
+                0xC1: ['abB', 'ab6', 'ab8'],   # Ditch Auto (pulse on w/ horn)
+                0xC2: ['ab7', 'ab8', 'abA'],   # Ditch On (pulse off w/ horn)
+                0xC3: ['ab9', 'ab6', 'abA'],   # Ditch Flashing
             }
             mth_cmd = lighting_map.get(param_data)
             if mth_cmd:
                 cmd_names = {
-                    'ab1C': 'markers ON', 'ab1D': 'markers OFF',
+                    'ab1C': 'markers OFF', 'ab1D': 'markers ON',
                     'abC': 'beacon OFF', 'abD': 'beacon ON',
+                    'ab4': 'mars OFF', 'ab5': 'mars ON',
+                    'ab2': 'interior OFF', 'ab3': 'interior ON',
                 }
-                logger.info(f"💡 Multi-word lighting: data=0x{param_data:02x} -> {mth_cmd} ({cmd_names.get(mth_cmd, '?')}) for engine {address}")
+                # Handle list (ditch lights) vs string (single command)
+                display_cmd = mth_cmd[0] if isinstance(mth_cmd, list) else mth_cmd
+                name = cmd_names.get(display_cmd, 'ditch lights')
+                logger.info(f"💡 Multi-word lighting: data=0x{param_data:02x} -> {mth_cmd} ({name}) for engine {address}")
                 return {'type': 'lighting_direct', 'value': mth_cmd, 'engine': address, 'protocol': 'legacy'}
             else:
                 logger.debug(f"💡 Multi-word lighting: data=0x{param_data:02x} (no MTH equivalent) for engine {address}")
@@ -6122,8 +6191,6 @@ class LionelMTHBridge:
         We wait 2 seconds after detecting a complete consist to allow more engines to arrive.
         If more engines arrive, the timer is reset.
         """
-        import threading
-        
         if not hasattr(self, '_lashup_creation_timers'):
             self._lashup_creation_timers = {}
         
@@ -6147,7 +6214,6 @@ class LionelMTHBridge:
         """Create MTH lashup from detected consist engines"""
         try:
             # Build consist components list
-            from dataclasses import dataclass
             components = []
             for engine_id, info in engines.items():
                 # Create a simple object with the needed attributes
@@ -6156,7 +6222,7 @@ class LionelMTHBridge:
                         self.tmcc_id = tmcc_id
                         self.position = position
                         self.is_reversed = direction == 1
-                
+
                 components.append(Component(engine_id, info['position'], info['direction']))
             
             # Sort by position (head first, then middle, then tail)
@@ -6409,24 +6475,59 @@ class LionelMTHBridge:
         """Stop the bridge"""
         logger.info("🛑 Stopping bridge...")
         self.running = False
-        
+
+        # Stop command queue
+        if hasattr(self, 'command_queue') and self.command_queue:
+            self.command_queue.stop()
+
         # Stop TCP serial proxy
         if self.serial_tcp_proxy:
             self.serial_tcp_proxy.stop()
-        
+
+        # Stop WLED controller
+        if self.wled_controller:
+            try:
+                self.wled_controller.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping WLED controller: {e}")
+
+        # Stop HTTP status server
+        if hasattr(self, 'status_server') and self.status_server:
+            try:
+                self.status_server.shutdown()
+                self.status_server.server_close()
+            except Exception as e:
+                logger.warning(f"Error stopping HTTP status server: {e}")
+
+        # Disconnect Base 3 WiFi client
+        if hasattr(self, 'base3_wifi') and self.base3_wifi:
+            try:
+                self.base3_wifi.disconnect()
+            except Exception as e:
+                logger.warning(f"Error disconnecting Base 3 WiFi: {e}")
+
+        # Close MTH WTIU socket
+        if self.mth_socket:
+            try:
+                self.mth_socket.close()
+            except Exception as e:
+                logger.warning(f"Error closing MTH socket: {e}")
+            self.mth_socket = None
+        self.mth_connected = False
+
         # Close serial connections safely
         if self.lionel_serial and hasattr(self.lionel_serial, 'is_open') and self.lionel_serial.is_open:
             try:
                 self.lionel_serial.close()
             except Exception as e:
                 logger.warning(f"Error closing Lionel serial: {e}")
-        
+
         if self.mcu_serial and hasattr(self.mcu_serial, 'is_open') and self.mcu_serial.is_open:
             try:
                 self.mcu_serial.close()
             except Exception as e:
                 logger.warning(f"Error closing MCU serial: {e}")
-        
+
         logger.info("✅ Bridge stopped")
     
     def run_forever(self):
@@ -6434,7 +6535,13 @@ class LionelMTHBridge:
         if not self.start():
             logger.error("❌ Failed to start bridge")
             return
-        
+
+        # Handle SIGTERM (sent by systemd on stop) for clean shutdown
+        def _sigterm_handler(signum, frame):
+            logger.info("📡 Received SIGTERM signal")
+            self.running = False
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+
         try:
             while self.running:
                 time.sleep(1)
