@@ -10,9 +10,9 @@ Quick use:
     controller = WLEDController(
         host="192.168.0.10",
         mapping={
-            (50, 0x01): "on",        # ACC 50 keypad 1 -> lights on
-            (50, 0x02): "off",       # ACC 50 keypad 2 -> lights off
-            (50, 0x03): "cycle",     # ACC 50 keypad 3 -> next preset
+            (50, 0x11): "on",        # ACC 50 keypad 1 -> lights on
+            (50, 0x12): "off",       # ACC 50 keypad 2 -> lights off
+            (50, 0x13): "cycle",     # ACC 50 keypad 3 -> next preset
         },
         pattern_presets=[1, 2, 3],     # optional list of WLED preset IDs to cycle
     )

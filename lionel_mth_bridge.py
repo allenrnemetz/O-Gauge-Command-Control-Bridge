@@ -178,9 +178,9 @@ class Config:
                 # Mapping: {"<acc_address>": {"<data_field>": "action"}}
                 "mapping": {
                     "50": {
-                        "1": "on",     # ACC 50 keypad 1
-                        "2": "off",    # ACC 50 keypad 2
-                        "3": "cycle"   # ACC 50 keypad 3
+                        "17": "on",     # ACC 50 keypad 1 (data_field 0x11)
+                        "18": "off",    # ACC 50 keypad 2 (data_field 0x12)
+                        "19": "cycle"   # ACC 50 keypad 3 (data_field 0x13)
                     }
                 }
             },
