@@ -17,7 +17,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import LionelMthBridgeCoordinator
-from .const import DOMAIN
+from .const import DOMAIN, SW_VERSION
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ async def async_setup_entry(
         name="Lionel MTH Bridge",
         manufacturer="Allen Nemetz",
         model="O-Gauge Command Control Bridge",
-        sw_version="1.4.0",
+        sw_version=SW_VERSION,
     )
 
     async_add_entities([RefreshEnginesButton(coordinator, device_info)])
