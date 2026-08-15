@@ -322,7 +322,7 @@ You can run Lionel and MTH engines together in the same lashup:
 | **Bell** | Lead engine only |
 | **Startup/Shutdown** | All MTH engines in lashup |
 | **Volume** | All MTH engines in lashup |
-| **Couplers** | All MTH engines in lashup |
+| **Couplers** | Correct end engine only (orientation-aware) |
 | **Smoke** | Cycle through levels (off/low/med/high) |
 | **Momentum** | Low/med/high mapped to MTH acceleration/deceleration |
 | **Headlights** | Automatic — lead engine on, others off (updated on direction change) |

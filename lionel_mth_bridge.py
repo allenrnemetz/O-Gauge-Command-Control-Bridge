@@ -5073,15 +5073,41 @@ class LionelMTHBridge:
             self._ensure_lashup_created_on_wtiu(train_id, mth_id)
             self.send_lashup_command(mth_id, "u4", train_id)
             return
-        # 0x105 = Rear Coupler (Lionel) -> c0 (MTH front coupler fires rear on consist)
+        # 0x105 = Rear Coupler (Lionel)
         if cmd_code == 0x105:
-            logger.info(f"🚂 TR{train_id} rear coupler -> MTH lashup {mth_id}")
-            self.send_lashup_command(mth_id, "c0", train_id)  # Swapped: c0 fires rear on consist
+            mth_engines = self.lashup_manager.mth_engines_in_lashup.get(train_id, [])
+            if len(mth_engines) == 1:
+                # Single MTH engine — send directly, swap based on orientation
+                dcs_engine = mth_engines[0]
+                is_reversed = bool(dcs_engine & 0x80)
+                # Lionel rear coupler: if engine is forward, fire rear (c1)
+                # If engine is reversed, its rear coupler is at the front, so fire front (c0)
+                mth_cmd = "c0" if is_reversed else "c1"
+                logger.info(f"🚂 TR{train_id} rear coupler (single MTH engine, {'REV' if is_reversed else 'FWD'}) -> {mth_cmd}")
+            else:
+                # Multi-engine lashup — DCS handles routing to the correct end
+                # In a DCS lashup, c0 (front) fires the rear of the consist
+                mth_cmd = "c0"
+                logger.info(f"🚂 TR{train_id} rear coupler (lashup) -> {mth_cmd}")
+            self.send_lashup_command(mth_id, mth_cmd, train_id)
             return
-        # 0x106 = Front Coupler (Lionel) -> c1 (MTH rear coupler fires front on consist)
+        # 0x106 = Front Coupler (Lionel)
         if cmd_code == 0x106:
-            logger.info(f"🚂 TR{train_id} front coupler -> MTH lashup {mth_id}")
-            self.send_lashup_command(mth_id, "c1", train_id)  # Swapped: c1 fires front on consist
+            mth_engines = self.lashup_manager.mth_engines_in_lashup.get(train_id, [])
+            if len(mth_engines) == 1:
+                # Single MTH engine — send directly, swap based on orientation
+                dcs_engine = mth_engines[0]
+                is_reversed = bool(dcs_engine & 0x80)
+                # Lionel front coupler: if engine is forward, fire front (c0)
+                # If engine is reversed, its front coupler is at the rear, so fire rear (c1)
+                mth_cmd = "c1" if is_reversed else "c0"
+                logger.info(f"🚂 TR{train_id} front coupler (single MTH engine, {'REV' if is_reversed else 'FWD'}) -> {mth_cmd}")
+            else:
+                # Multi-engine lashup — DCS handles routing to the correct end
+                # In a DCS lashup, c1 (rear) fires the front of the consist
+                mth_cmd = "c1"
+                logger.info(f"🚂 TR{train_id} front coupler (lashup) -> {mth_cmd}")
+            self.send_lashup_command(mth_id, mth_cmd, train_id)
             return
         # 0x10D = AUX2 (Headlight Toggle) - MTH uses ab1 (ON) / ab0 (OFF)
         if cmd_code == 0x10D:
