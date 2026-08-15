@@ -2,7 +2,7 @@
 
 **Control MTH DCS trains using your Lionel Cab-1L, Cab-2, or Cab-3 remote**
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
 ---
 
@@ -28,6 +28,11 @@ This bridge translates Lionel TMCC and Legacy commands to MTH DCS commands, lett
 - **ProtoWhistle/Quilling Horn** - Legacy whistle slider controls MTH whistle pitch
 - **Extended Startup/Shutdown** - Hold power button for full startup/shutdown sequences
 - **PFA Announcements** - Passenger/Freight announcements via CAB3
+- **Consist-Aware Headlights** - Automatically sets MTH engine headlights based on consist position and direction (lead engine on, others off)
+- **Lighting Translation** - Legacy marker lights and strobe/beacon commands translated to MTH DCS equivalents
+- **Smoke Control** - Legacy cycles through smoke levels (off/low/med/high), TMCC1 simple on/off
+- **Volume Control** - Proper 0-100 scaling for all volume paths (buttons, speed dial)
+- **Momentum Control** - Legacy 0-7 momentum levels and TMCC1 low/med/high mapped to MTH acceleration/deceleration rates
 
 ---
 
@@ -248,6 +253,8 @@ The daylight cycle smoothly transitions through morning → afternoon → sunset
 | **Keypad 5** | Quick engine shutdown | ✅ Verified |
 | **Keypad 8** | Smoke off | ✅ Verified |
 | **Keypad 9** | Smoke on | ✅ Verified |
+| **Keypad 1** | Volume up | ✅ Verified |
+| **Keypad 4** | Volume down | ✅ Verified |
 | **Front Coupler** | Fire front coupler | ✅ Verified |
 | **Rear Coupler** | Fire rear coupler | ✅ Verified |
 
@@ -273,6 +280,9 @@ The daylight cycle smoothly transitions through morning → afternoon → sunset
 | **Rear Coupler** | Fire rear coupler | ✅ Verified |
 | **Boost** | Increase speed | ✅ Verified |
 | **Brake** | Decrease speed | ✅ Verified |
+| **Momentum** | 0-7 levels mapped to MTH acceleration/deceleration | ✅ Verified |
+| **Marker Lights** | On/off translated to MTH markers | ✅ Verified |
+| **Strobe/Beacon** | On/off translated to MTH beacon | ✅ Verified |
 
 ### Engines Tested
 
@@ -313,6 +323,9 @@ You can run Lionel and MTH engines together in the same lashup:
 | **Startup/Shutdown** | All MTH engines in lashup |
 | **Volume** | All MTH engines in lashup |
 | **Couplers** | All MTH engines in lashup |
+| **Smoke** | Cycle through levels (off/low/med/high) |
+| **Momentum** | Low/med/high mapped to MTH acceleration/deceleration |
+| **Headlights** | Automatic — lead engine on, others off (updated on direction change) |
 
 ### Breaking Up a Lashup
 
@@ -472,4 +485,4 @@ The script will:
 
 ## License
 
-GNU General Public License v3.0 - Copyright (c) 2026 Allen Nemetz
+GNU Affero General Public License v3.0 - Copyright (c) 2026 Allen Nemetz
