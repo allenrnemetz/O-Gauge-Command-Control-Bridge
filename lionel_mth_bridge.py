@@ -3017,16 +3017,26 @@ class LionelMTHBridge:
                 logger.info(f"🎯 Legacy coupler: Engine {engine} → {coupler} ({mth_cmd})")
                 return self.send_wtiu_command(mth_cmd)
             
-            # Legacy momentum commands
+            # Legacy/TMCC1 momentum commands
+            # MTH DCS: Da<value> = acceleration rate, Dd<value> = deceleration rate (0-31)
             elif command.get('type') == 'momentum':
                 value = command.get('value')
-                logger.info(f"🎯 Legacy momentum: Engine {engine} → {value}")
-                if value == 'low':
-                    return self.send_wtiu_command('Da4') and self.send_wtiu_command('Dd4')
+                logger.info(f"🎯 Momentum: Engine {engine} → {value}")
+                if isinstance(value, int):
+                    # Legacy 0-7 momentum levels → scale to MTH 0-31
+                    mth_rate = value * 31 // 7
+                    logger.info(f"🎯 Legacy momentum {value} -> MTH Da{mth_rate}/Dd{mth_rate}")
+                    self.send_wtiu_command(f'Da{mth_rate}')
+                    return self.send_wtiu_command(f'Dd{mth_rate}')
+                elif value == 'low':
+                    self.send_wtiu_command('Da4')
+                    return self.send_wtiu_command('Dd4')
                 elif value == 'medium':
-                    return self.send_wtiu_command('Da12') and self.send_wtiu_command('Dd12')
+                    self.send_wtiu_command('Da16')
+                    return self.send_wtiu_command('Dd16')
                 elif value == 'high':
-                    return self.send_wtiu_command('Da25') and self.send_wtiu_command('Dd25')
+                    self.send_wtiu_command('Da31')
+                    return self.send_wtiu_command('Dd31')
                 return True
             
             # Legacy horn commands
@@ -3261,23 +3271,24 @@ class LionelMTHBridge:
                 logger.debug(f"💨 smoke_direct: engine={engine}, mth_lashup_id={mth_lashup_id}, tr_to_mth={self.lashup_manager.tr_to_mth}")
                 if mth_lashup_id:
                     # This is a lashup - send smoke command to lashup
+                    # Also sync smoke_states so cycling commands stay in sync
+                    smoke_state_map = {'off': 0, 'low': 1, 'med': 2, 'high': 3}
+                    if value in smoke_state_map:
+                        self.smoke_states[engine] = smoke_state_map[value]
                     if value == 'off':
                         logger.info(f"💨 TR{engine} smoke OFF -> MTH lashup {mth_lashup_id}")
                         return self.send_lashup_command(mth_lashup_id, "abE", engine)
                     elif value == 'low':
                         logger.info(f"💨 TR{engine} smoke LOW -> MTH lashup {mth_lashup_id}")
-                        self.send_lashup_command(mth_lashup_id, "abF", engine)  # Turn on first
                         return self.send_lashup_command(mth_lashup_id, "ab12", engine)
                     elif value == 'med':
                         logger.info(f"💨 TR{engine} smoke MED -> MTH lashup {mth_lashup_id}")
-                        self.send_lashup_command(mth_lashup_id, "abF", engine)  # Turn on first
                         return self.send_lashup_command(mth_lashup_id, "ab11", engine)
                     elif value == 'high':
                         logger.info(f"💨 TR{engine} smoke HIGH -> MTH lashup {mth_lashup_id}")
-                        self.send_lashup_command(mth_lashup_id, "abF", engine)  # Turn on first
                         return self.send_lashup_command(mth_lashup_id, "ab10", engine)
                     return True
-                
+
                 # Single engine smoke control
                 if value == 'off':
                     self.smoke_states[engine] = 0
@@ -3286,36 +3297,48 @@ class LionelMTHBridge:
                 elif value == 'low':
                     self.smoke_states[engine] = 1
                     logger.info(f"💨 Smoke LOW (direct) for engine {engine}")
-                    self.send_wtiu_command('abF')  # Turn on first
                     return self.send_wtiu_command('ab12')
                 elif value == 'med':
                     self.smoke_states[engine] = 2
                     logger.info(f"💨 Smoke MED (direct) for engine {engine}")
-                    self.send_wtiu_command('abF')  # Turn on first
                     return self.send_wtiu_command('ab11')
                 elif value == 'high':
                     self.smoke_states[engine] = 3
                     logger.info(f"💨 Smoke HIGH (direct) for engine {engine}")
-                    self.send_wtiu_command('abF')  # Turn on first
                     return self.send_wtiu_command('ab10')
                 return True
-            
+
+            # Legacy lighting_direct commands from multi-word 0xFB packets
+            # Translates Lionel lighting index 0x0D to MTH DCS equivalents
+            elif command.get('type') == 'lighting_direct':
+                value = command.get('value')
+                engine = command.get('engine', self.current_lionel_engine)
+
+                # Check if this is a TR ID (lashup) - forward to lashup instead
+                mth_lashup_id = self.lashup_manager.get_mth_id_for_tr(engine)
+                if mth_lashup_id:
+                    logger.info(f"💡 TR{engine} lighting {value} -> MTH lashup {mth_lashup_id}")
+                    return self.send_lashup_command(mth_lashup_id, value, engine)
+
+                # Single engine lighting control
+                logger.info(f"💡 Engine {engine} lighting -> {value}")
+                return self.send_wtiu_command(value)
+
             # Legacy smoke commands - track state for cycling behavior
             # Legacy cycles: Smoke ON button = off->low->med->high, Smoke OFF button = high->med->low->off
-            # MTH: abE=off, ab12=min, ab11=med, ab10=max
+            # MTH: abE=off, ab12=min, ab11=med, ab10=max (absolute level commands, no abF needed)
             elif command.get('type') == 'smoke':
                 value = command.get('value')
                 engine = command.get('engine', self.current_lionel_engine)
                 current_state = self.smoke_states.get(engine, 0)  # 0=off, 1=low, 2=med, 3=high
-                
+
                 if value == 'on' or value == 'up':
                     # Cycle up: off->low->med->high
                     new_state = min(3, current_state + 1)
                     self.smoke_states[engine] = new_state
-                    
+
                     if new_state == 1:
                         logger.info(f"💨 Smoke LOW for engine {engine}")
-                        self.send_wtiu_command('abF')  # Turn on first
                         return self.send_wtiu_command('ab12')  # Min
                     elif new_state == 2:
                         logger.info(f"💨 Smoke MED for engine {engine}")
@@ -3324,12 +3347,12 @@ class LionelMTHBridge:
                         logger.info(f"💨 Smoke HIGH for engine {engine}")
                         return self.send_wtiu_command('ab10')  # Max
                     return True
-                    
+
                 elif value == 'off' or value == 'down':
                     # Cycle down: high->med->low->off
                     new_state = max(0, current_state - 1)
                     self.smoke_states[engine] = new_state
-                    
+
                     if new_state == 2:
                         logger.info(f"💨 Smoke MED for engine {engine}")
                         return self.send_wtiu_command('ab11')  # Med
@@ -3397,7 +3420,7 @@ class LionelMTHBridge:
                         self.last_command_time['volume'] = current_time
                         self.master_volume = min(100, self.master_volume + self.volume_step)
                         logger.info(f" Legacy Numeric 1 → Volume Up: {self.master_volume}")
-                        return self.send_wtiu_command(f'v0{self.master_volume}')  # v0 = master volume
+                        return self.send_wtiu_command(f'v0{self.master_volume:03d}')  # v0 = master volume
                     return True  # Debounced, ignore
                     
                 # CAB3 uses Numeric 4 for volume down (with debouncing)
@@ -3407,7 +3430,7 @@ class LionelMTHBridge:
                         self.last_command_time['volume'] = current_time
                         self.master_volume = max(0, self.master_volume - self.volume_step)
                         logger.info(f" Legacy Numeric 4 → Volume Down: {self.master_volume}")
-                        return self.send_wtiu_command(f'v0{self.master_volume}')  # v0 = master volume
+                        return self.send_wtiu_command(f'v0{self.master_volume:03d}')  # v0 = master volume
                     return True  # Debounced, ignore
                     
                 # CAB3 uses Numeric 5 for shutdown - debounce to prevent flooding WTIU
@@ -4764,6 +4787,7 @@ class LionelMTHBridge:
             if not hasattr(self, '_lashup_direction_states'):
                 self._lashup_direction_states = {}
             self._lashup_direction_states[train_id] = 0  # 0 = forward
+            self._apply_consist_headlights(train_id, 0)
             return
         if cmd_code == 0x101:  # Toggle direction (Cab 1L sends this)
             # Track direction state and send explicit forward/reverse
@@ -4792,6 +4816,7 @@ class LionelMTHBridge:
             else:
                 logger.info(f"🚂 TR{train_id} toggle -> reverse -> MTH lashup {mth_id}")
                 self.send_lashup_command(mth_id, "d1", train_id)
+            self._apply_consist_headlights(train_id, new_dir)
             return
         if cmd_code == 0x103:  # Reverse
             logger.info(f"🚂 TR{train_id} reverse -> MTH lashup {mth_id}")
@@ -4800,6 +4825,7 @@ class LionelMTHBridge:
             if not hasattr(self, '_lashup_direction_states'):
                 self._lashup_direction_states = {}
             self._lashup_direction_states[train_id] = 1  # 1 = reverse
+            self._apply_consist_headlights(train_id, 1)
             return
         
         # Boost/Brake
@@ -4810,6 +4836,32 @@ class LionelMTHBridge:
         if cmd_code == 0x107:  # Brake
             logger.info(f"🚂 TR{train_id} brake -> MTH lashup {mth_id}")
             self.send_lashup_command(mth_id, "s-5", train_id)  # Relative speed decrease
+            return
+
+        # Momentum commands (TMCC1 train: 0x128/0x129/0x12A, Legacy: 0xC8-0xCF)
+        # MTH DCS: Da<value> = acceleration, Dd<value> = deceleration (0-31)
+        if cmd_code == 0x128:  # TMCC1 Momentum Low
+            logger.info(f"🚂 TR{train_id} momentum low -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "Da4", train_id)
+            self.send_lashup_command(mth_id, "Dd4", train_id)
+            return
+        if cmd_code == 0x129:  # TMCC1 Momentum Medium
+            logger.info(f"🚂 TR{train_id} momentum medium -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "Da16", train_id)
+            self.send_lashup_command(mth_id, "Dd16", train_id)
+            return
+        if cmd_code == 0x12A:  # TMCC1 Momentum High
+            logger.info(f"🚂 TR{train_id} momentum high -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, "Da31", train_id)
+            self.send_lashup_command(mth_id, "Dd31", train_id)
+            return
+        # Legacy train momentum: 0x1C8-0x1CF (0x100 + 0xC8-0xCF)
+        if 0x1C8 <= cmd_code <= 0x1CF:
+            level = cmd_code & 0x07
+            mth_rate = level * 31 // 7
+            logger.info(f"🚂 TR{train_id} momentum {level} -> MTH lashup {mth_id} Da{mth_rate}/Dd{mth_rate}")
+            self.send_lashup_command(mth_id, f"Da{mth_rate}", train_id)
+            self.send_lashup_command(mth_id, f"Dd{mth_rate}", train_id)
             return
         
         # Relative speed commands (0x130-0x13F) - Cab 1L speed dial sends these
@@ -4982,7 +5034,7 @@ class LionelMTHBridge:
         # 0x111 = Button 1 (Volume Up)
         if cmd_code == 0x111:
             current_vol = self._lashup_volume.get(train_id, 50)  # Default 50%
-            new_vol = min(100, current_vol + 10)
+            new_vol = min(100, current_vol + self.volume_step)
             self._lashup_volume[train_id] = new_vol
             logger.info(f"🚂 TR{train_id} volume up -> MTH lashup {mth_id} vol {new_vol}%")
             self.send_lashup_command(mth_id, f"v0{new_vol:03d}", train_id)  # Master volume
@@ -4990,7 +5042,7 @@ class LionelMTHBridge:
         # 0x114 = Button 4 (Volume Down)
         if cmd_code == 0x114:
             current_vol = self._lashup_volume.get(train_id, 50)  # Default 50%
-            new_vol = max(0, current_vol - 10)
+            new_vol = max(0, current_vol - self.volume_step)
             self._lashup_volume[train_id] = new_vol
             logger.info(f"🚂 TR{train_id} volume down -> MTH lashup {mth_id} vol {new_vol}%")
             self.send_lashup_command(mth_id, f"v0{new_vol:03d}", train_id)  # Master volume
@@ -5058,24 +5110,36 @@ class LionelMTHBridge:
             logger.info(f"🚂 TR{train_id} engine reset (btn 0) -> MTH lashup {mth_id}")
             # No direct MTH equivalent for engine reset in lashup mode
             return
-        # 0x118 = Button 8 (Smoke Down)
+        # 0x118 = Button 8 (Smoke Down) — cycle: high->med->low->off
         if cmd_code == 0x118:
-            logger.info(f"🚂 TR{train_id} smoke down (btn 8) -> MTH lashup {mth_id}")
-            self.send_lashup_command(mth_id, "abE", train_id)  # Smoke down/off
+            if not hasattr(self, '_lashup_smoke_states'):
+                self._lashup_smoke_states = {}
+            current_state = self._lashup_smoke_states.get(train_id, 0)  # 0=off, 1=low, 2=med, 3=high
+            new_state = max(0, current_state - 1)
+            self._lashup_smoke_states[train_id] = new_state
+            smoke_cmds = {0: 'abE', 1: 'ab12', 2: 'ab11'}  # off, min, med
+            logger.info(f"🚂 TR{train_id} smoke down (btn 8) -> level {new_state} -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, smoke_cmds.get(new_state, 'abE'), train_id)
             return
-        # 0x119 = Button 9 (Smoke Up)
+        # 0x119 = Button 9 (Smoke Up) — cycle: off->low->med->high
         if cmd_code == 0x119:
-            logger.info(f"🚂 TR{train_id} smoke up (btn 9) -> MTH lashup {mth_id}")
-            self.send_lashup_command(mth_id, "abF", train_id)  # Smoke up/on
+            if not hasattr(self, '_lashup_smoke_states'):
+                self._lashup_smoke_states = {}
+            current_state = self._lashup_smoke_states.get(train_id, 0)  # 0=off, 1=low, 2=med, 3=high
+            new_state = min(3, current_state + 1)
+            self._lashup_smoke_states[train_id] = new_state
+            smoke_cmds = {1: 'ab12', 2: 'ab11', 3: 'ab10'}  # min, med, max
+            logger.info(f"🚂 TR{train_id} smoke up (btn 9) -> level {new_state} -> MTH lashup {mth_id}")
+            self.send_lashup_command(mth_id, smoke_cmds.get(new_state, 'abF'), train_id)
             return
         
         # Volume control (0x1B0-0x1BF) - master volume (from speed dial)
         if 0x1B0 <= cmd_code <= 0x1BF:
             vol_level = cmd_code & 0x0F
-            # DCS volume is 0-8, Legacy is 0-15, so scale
-            dcs_vol = min(8, vol_level // 2)
+            # MTH DCS master volume is 0-100, Legacy speed dial is 0-15
+            dcs_vol = min(100, vol_level * 100 // 15)
             logger.info(f"🚂 TR{train_id} volume {vol_level} -> MTH lashup {mth_id} vol {dcs_vol}")
-            self.send_lashup_command(mth_id, f"v{dcs_vol:02d}00", train_id)  # Master volume
+            self.send_lashup_command(mth_id, f"v0{dcs_vol:03d}", train_id)  # Master volume
             return
         
         # Startup/Shutdown sequences (from menu/extended) - use same debounce as quick startup
@@ -5516,10 +5580,10 @@ class LionelMTHBridge:
                 logger.info(f"🔊 Idle sound: i3")
                 return 'i3'
             elif cmd_type == 'function' and cmd_value == 'smoke_up':
-                # Smoke Up Cycle (Keypad 9): off->min->med->max
+                # TMCC1 Smoke On (Keypad 9): simple on/off — no level cycling
                 engine = self.current_lionel_engine
                 current_time = time.time()
-                
+
                 # Debounce smoke commands (1 second)
                 if not hasattr(self, '_smoke_debounce_time'):
                     self._smoke_debounce_time = {}
@@ -5527,20 +5591,14 @@ class LionelMTHBridge:
                 if current_time - last_debounce < 1.0:
                     return None  # Ignore repeated packets
                 self._smoke_debounce_time[engine] = current_time
-                
-                current_state = self.smoke_states.get(engine, 0)
-                new_state = min(3, current_state + 1)
-                self.smoke_states[engine] = new_state
-                smoke_cmds = {1: 'ab12', 2: 'ab11', 3: 'ab10'}  # min, med, max
-                if new_state == 1:
-                    self.send_wtiu_command('abF')  # Turn on first
-                logger.info(f"💨 Smoke UP: Engine {engine} level {new_state}")
-                return smoke_cmds.get(new_state, 'abF')
+
+                logger.info(f"💨 Smoke ON: Engine {engine}")
+                return 'abF'
             elif cmd_type == 'function' and cmd_value == 'smoke_down':
-                # Smoke Down Cycle (Keypad 8): max->med->min->off
+                # TMCC1 Smoke Off (Keypad 8): simple on/off — no level cycling
                 engine = self.current_lionel_engine
                 current_time = time.time()
-                
+
                 # Debounce smoke commands (1 second)
                 if not hasattr(self, '_smoke_debounce_time'):
                     self._smoke_debounce_time = {}
@@ -5548,13 +5606,9 @@ class LionelMTHBridge:
                 if current_time - last_debounce < 1.0:
                     return None  # Ignore repeated packets
                 self._smoke_debounce_time[engine] = current_time
-                
-                current_state = self.smoke_states.get(engine, 0)
-                new_state = max(0, current_state - 1)
-                self.smoke_states[engine] = new_state
-                smoke_cmds = {0: 'abE', 1: 'ab12', 2: 'ab11'}  # off, min, med
-                logger.info(f"💨 Smoke DOWN: Engine {engine} level {new_state}")
-                return smoke_cmds.get(new_state, 'abE')
+
+                logger.info(f"💨 Smoke OFF: Engine {engine}")
+                return 'abE'
             elif cmd_type == 'function' and cmd_value == 'aux2_option1':
                 # Cab 1L AUX2 button = Headlight Toggle - track state with debounce
                 engine = self.current_lionel_engine
@@ -5906,9 +5960,28 @@ class LionelMTHBridge:
         
         # Lighting commands (param_index 0x0D)
         if param_index == 0x0D:
-            logger.info(f"💡 Multi-word lighting: data=0x{param_data:02x} for engine {address}")
-            # Could add lighting handling here
-            return None
+            # Lionel lighting → MTH DCS mapping (direct equivalents only)
+            # From Lionel LCS Protocol Spec v1.21 and MTH RTC source code
+            lighting_map = {
+                0x68: 'ab1D',  # Loco Marker Light Off  → MARKERS_OFF
+                0x69: 'ab1C',  # Loco Marker Light On   → MARKERS_ON
+                0x6C: 'ab1D',  # Tender Marker Light Off → MARKERS_OFF
+                0x6D: 'ab1C',  # Tender Marker Light On  → MARKERS_ON
+                0x78: 'abC',   # Strobe Light Off        → BEACON_OFF
+                0x79: 'abD',   # Strobe Light On, Single → BEACON_ON
+                0x7A: 'abD',   # Strobe Light On, Double → BEACON_ON
+            }
+            mth_cmd = lighting_map.get(param_data)
+            if mth_cmd:
+                cmd_names = {
+                    'ab1C': 'markers ON', 'ab1D': 'markers OFF',
+                    'abC': 'beacon OFF', 'abD': 'beacon ON',
+                }
+                logger.info(f"💡 Multi-word lighting: data=0x{param_data:02x} -> {mth_cmd} ({cmd_names.get(mth_cmd, '?')}) for engine {address}")
+                return {'type': 'lighting_direct', 'value': mth_cmd, 'engine': address, 'protocol': 'legacy'}
+            else:
+                logger.debug(f"💡 Multi-word lighting: data=0x{param_data:02x} (no MTH equivalent) for engine {address}")
+                return None
         
         return None
     
@@ -6072,9 +6145,17 @@ class LionelMTHBridge:
             # lashup speed handler can send d0/d1 before the first speed.
             if not hasattr(self, '_consist_engine_direction'):
                 self._consist_engine_direction = {}
+            # Store per-engine position for consist-aware headlight control.
+            # Position: 0=SINGLE, 1=HEAD, 2=MIDDLE, 3=TAIL
+            if not hasattr(self, '_consist_engine_position'):
+                self._consist_engine_position = {}
             for comp in components:
                 self._consist_engine_direction[comp.tmcc_id] = 1 if comp.is_reversed else 0
-                logger.info(f"🔗 Stored consist direction for engine {comp.tmcc_id}: {'REV' if comp.is_reversed else 'FWD'}")
+                self._consist_engine_position[comp.tmcc_id] = comp.position
+                logger.info(f"🔗 Stored consist info for engine {comp.tmcc_id}: {'REV' if comp.is_reversed else 'FWD'}, position={comp.position}")
+
+            # Apply consist-aware headlights (default forward on creation)
+            self._apply_consist_headlights(train_id, 0)
 
             # Clear pending engines for this train
             if train_id in self._pending_consist_engines:
@@ -6082,7 +6163,59 @@ class LionelMTHBridge:
                 
         except Exception as e:
             logger.error(f"Error creating lashup from consist: {e}")
-    
+
+    def _apply_consist_headlights(self, train_id, travel_direction):
+        """Set MTH engine headlights based on consist position and travel direction.
+
+        - Forward (0): HEAD engine headlight ON, MIDDLE/TAIL OFF
+        - Reverse (1): TAIL engine headlight ON, HEAD/MIDDLE OFF
+        - Single engine: always ON
+
+        Only MTH engines in the lashup are affected; Lionel engines handle
+        their own lights via the Base 3.
+        """
+        try:
+            mth_engines = self.lashup_manager.mth_engines_in_lashup.get(train_id, [])
+            if not mth_engines:
+                return
+
+            # Map MTH DCS engine IDs to their Lionel TMCC IDs via discovered_mth_engines
+            # so we can look up their consist position.
+            dcs_to_tmcc = {}
+            for lionel_addr, dcs_id in self.discovered_mth_engines.items():
+                dcs_to_tmcc[int(dcs_id)] = int(lionel_addr)
+
+            consist_positions = getattr(self, '_consist_engine_position', {})
+
+            for dcs_engine_with_dir in mth_engines:
+                dcs_engine = dcs_engine_with_dir & 0x7F  # Strip direction bit
+                tmcc_id = dcs_to_tmcc.get(dcs_engine)
+                if tmcc_id is None:
+                    continue
+
+                position = consist_positions.get(tmcc_id)
+                if position is None:
+                    continue
+
+                # Determine if this engine is the lead engine
+                # Position: 0=SINGLE, 1=HEAD, 2=MIDDLE, 3=TAIL
+                if position == 0:  # SINGLE — always lead
+                    is_lead = True
+                elif position == 1:  # HEAD — lead when forward
+                    is_lead = (travel_direction == 0)
+                elif position == 3:  # TAIL — lead when reverse
+                    is_lead = (travel_direction == 1)
+                else:  # MIDDLE — never lead
+                    is_lead = False
+
+                mth_cmd = "ab1" if is_lead else "ab0"
+                mth_lashup_id = self.lashup_manager.get_mth_id_for_tr(train_id)
+                if mth_lashup_id:
+                    logger.info(f"💡 TR{train_id} consist headlight: engine {dcs_engine} (pos={position}) -> {mth_cmd}")
+                    self.send_lashup_command(mth_lashup_id, mth_cmd, train_id)
+        except Exception as e:
+            logger.error(f"Error applying consist headlights: {e}")
+
     def _process_pdi_broadcast(self, data: bytes):
         """Process PDI broadcast packets from Base 3 (consist info broadcasts)"""
         try:
