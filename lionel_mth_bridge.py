@@ -3855,35 +3855,8 @@ class LionelMTHBridge:
                 
                 return True
             else:
-                logger.warning("⚠️ No MTH engines found via I0, trying fallback...")
-                for mth_engine in [6, 11]:
-                    try:
-                        self.mth_socket.settimeout(1.0)
-                        self.mth_socket.send(f"y{mth_engine}\r\n".encode())
-                        resp = self.mth_socket.recv(256).decode('latin-1')
-                        if "okay" in resp.lower():
-                            lionel_addr = mth_engine - 1
-                            # Merge with existing - add to available list
-                            with self.engine_data_lock:
-                                if mth_engine not in self.available_mth_engines:
-                                    self.available_mth_engines.append(mth_engine)
-                                # Update mapping if not manually configured
-                                if lionel_addr > 0 and str(lionel_addr) not in self.engine_mappings:
-                                    existing = self.discovered_mth_engines.get(str(lionel_addr))
-                                    if existing != mth_engine:
-                                        self.discovered_mth_engines[str(lionel_addr)] = mth_engine
-                                        if existing:
-                                            logger.info(f"🔗 Updated Lionel #{lionel_addr}: MTH #{existing} → MTH #{mth_engine}")
-                                        else:
-                                            logger.info(f"🔗 Auto-mapped Lionel #{lionel_addr} → MTH #{mth_engine}")
-                            logger.info(f"🚂 Found engine {mth_engine} via fallback")
-                    except:
-                        continue
+                logger.info("ℹ️ No MTH engines found via I0 (WTIU engine database is empty)")
                 self.mth_socket.settimeout(5.0)
-                
-                # Save mappings after fallback discovery
-                if self.discovered_mth_engines:
-                    self._save_engine_mappings()
                 
                 return len(self.available_mth_engines) > 0
                 
