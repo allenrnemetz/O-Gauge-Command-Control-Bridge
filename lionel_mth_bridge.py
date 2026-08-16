@@ -3411,8 +3411,26 @@ class LionelMTHBridge:
                 elif value == 'off':
                     return self.send_wtiu_command('ab2')
                 elif value == 'option1':
+                    # Debounce startup to prevent repeated u4 from toggling engine on/off
+                    if not hasattr(self, '_startup_debounce'):
+                        self._startup_debounce = {}
+                    last_startup = self._startup_debounce.get(engine, 0)
+                    if time.time() - last_startup < 5.0:  # 5 second debounce
+                        logger.debug(f"🚂 Aux1 Startup ignored (debounced) for engine {engine}")
+                        return True
+                    self._startup_debounce[engine] = time.time()
+                    logger.info(f"🚂 Aux1 Startup for engine {engine}")
                     return self.send_wtiu_command('u4')  # Startup
                 elif value == 'option2':
+                    # Debounce shutdown similarly
+                    if not hasattr(self, '_shutdown_debounce'):
+                        self._shutdown_debounce = {}
+                    last_shutdown = self._shutdown_debounce.get(engine, 0)
+                    if time.time() - last_shutdown < 5.0:  # 5 second debounce
+                        logger.debug(f"🚂 Aux1 Shutdown ignored (debounced) for engine {engine}")
+                        return True
+                    self._shutdown_debounce[engine] = time.time()
+                    logger.info(f"🚂 Aux1 Shutdown for engine {engine}")
                     return self.send_wtiu_command('u5')  # Shutdown
                 return True
             
