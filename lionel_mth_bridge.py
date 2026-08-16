@@ -6399,7 +6399,7 @@ class LionelMTHBridge:
         if self.lionel_serial and self.lionel_serial.is_open:
             self.start_tmcc_monitoring()
         
-        logger.info("✅ Bridge started with auto-reconnect! Use Lionel Base 3 remote...")
+        logger.info(f"✅ Bridge started {BRIDGE_VERSION} with auto-reconnect! Use Lionel Base 3 remote...")
         
         # Start whistle timeout monitor
         self.start_whistle_timeout_monitor()
@@ -6861,8 +6861,10 @@ def check_bell_quick_press(self):
         
         return commands
 
+BRIDGE_VERSION = "v1.6.7"
+
 def main():
-    print("🎯 Lionel Base 3 → MTH WTIU Bridge")
+    print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")
     print("=" * 50)
     print("FTDI Serial Adapter → Arduino MCU → WiFi → MTH")
     print("=" * 50)
