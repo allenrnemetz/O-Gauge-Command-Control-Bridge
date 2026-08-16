@@ -2641,6 +2641,22 @@ class LionelMTHBridge:
                         logger.info("✅ MTH WTIU reconnected successfully!")
                     else:
                         logger.warning("⚠️ MTH WTIU reconnect failed, will retry...")
+
+                # Check if Base 3 WiFi connection is still alive
+                if hasattr(self, 'base3_wifi') and self.base3_wifi:
+                    if not self.base3_wifi.connected:
+                        logger.warning("⚠️ Base 3 WiFi connection lost, attempting reconnect...")
+                        base3_host = self.settings.get('base3_host', 'auto')
+                        if base3_host == 'auto':
+                            if self.base3_wifi.connect():
+                                logger.info("✅ Base 3 WiFi reconnected successfully!")
+                            else:
+                                logger.warning("⚠️ Base 3 WiFi reconnect failed, will retry...")
+                        elif base3_host:
+                            if self.base3_wifi.connect(base3_host):
+                                logger.info("✅ Base 3 WiFi reconnected successfully!")
+                            else:
+                                logger.warning("⚠️ Base 3 WiFi reconnect failed, will retry...")
                 
             except Exception as e:
                 logger.error(f"❌ Connection monitor error: {e}")
