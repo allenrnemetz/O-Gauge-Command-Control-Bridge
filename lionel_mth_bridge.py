@@ -3221,7 +3221,7 @@ class LionelMTHBridge:
                     if not hasattr(self, '_startup_debounce'):
                         self._startup_debounce = {}
                     last_startup = self._startup_debounce.get(engine, 0)
-                    if current_time - last_startup < 2.0:  # 2 second debounce
+                    if current_time - last_startup < 5.0:  # 5 second debounce
                         logger.debug(f"🚂 Quick Startup ignored (debounced) for engine {engine}")
                         return True
                     self._startup_debounce[engine] = current_time
@@ -3237,7 +3237,7 @@ class LionelMTHBridge:
                     if not hasattr(self, '_shutdown_debounce'):
                         self._shutdown_debounce = {}
                     last_shutdown = self._shutdown_debounce.get(engine, 0)
-                    if current_time - last_shutdown < 2.0:  # 2 second debounce
+                    if current_time - last_shutdown < 5.0:  # 5 second debounce
                         logger.debug(f"🚂 Quick Shutdown ignored (debounced) for engine {engine}")
                         return True
                     self._shutdown_debounce[engine] = current_time
