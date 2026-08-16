@@ -5064,14 +5064,19 @@ class LionelMTHBridge:
                 self.send_lashup_command(mth_id, "w2", train_id)
                 self._lashup_whistle_states[whistle_key] = True
             
-            # Start timer to turn off whistle after 300ms of no horn commands
+            # Start timer to turn off whistle after 1.5s of no horn commands.
+            # The Legacy quilling whistle sends bursts of packets with brief gaps
+            # between them. A short timeout (300ms) causes rapid w2/bFFFD cycling
+            # that floods the WTIU and causes it to stop responding. 1.5s ensures
+            # the whistle stays on during brief quilling gaps and only turns off
+            # when the user actually releases the horn button.
             def whistle_off():
                 if self._lashup_whistle_states.get(whistle_key, False):
                     logger.info(f"🚂 TR{train_id} horn OFF (timeout) -> MTH lashup {mth_id}")
                     self.send_lashup_command(mth_id, "bFFFD", train_id)
                     self._lashup_whistle_states[whistle_key] = False
-            
-            timer = threading.Timer(0.3, whistle_off)
+
+            timer = threading.Timer(1.5, whistle_off)
             timer.daemon = True
             timer.start()
             self._lashup_whistle_timers[whistle_key] = timer
@@ -5356,14 +5361,15 @@ class LionelMTHBridge:
                     self.send_lashup_command(mth_id, "w2", train_id)
                     self._lashup_whistle_states[whistle_key] = True
                 
-                # Start timer to turn off whistle after 300ms of no horn commands
+                # Start timer to turn off whistle after 1.5s of no horn commands.
+                # See comment above re: WTIU flooding from rapid w2/bFFFD cycling.
                 def whistle_off():
                     if self._lashup_whistle_states.get(whistle_key, False):
                         logger.info(f"🚂 TR{train_id} horn OFF (timeout) -> MTH lashup {mth_id}")
                         self.send_lashup_command(mth_id, "bFFFD", train_id)
                         self._lashup_whistle_states[whistle_key] = False
-                
-                timer = threading.Timer(0.3, whistle_off)
+
+                timer = threading.Timer(1.5, whistle_off)
                 timer.daemon = True
                 timer.start()
                 self._lashup_whistle_timers[whistle_key] = timer
@@ -5463,6 +5469,15 @@ class LionelMTHBridge:
                 dcs_engine = mth_engines[0] & 0x7F  # Strip reverse-direction bit
                 try:
                     with self.mth_lock:
+                        # Rate limit: minimum 100ms between WTIU commands to
+                        # prevent flooding during rapid quilling horn cycling.
+                        if not hasattr(self, '_last_wtiu_command_time'):
+                            self._last_wtiu_command_time = 0
+                        time_since_last = time.time() - self._last_wtiu_command_time
+                        if time_since_last < 0.1:
+                            time.sleep(0.1 - time_since_last)
+                        self._last_wtiu_command_time = time.time()
+
                         # Always re-select the engine before each command.
                         # The WTIU's RF link to the engine can degrade between
                         # commands, causing bare commands (s0, s2, etc.) to be
@@ -5482,12 +5497,30 @@ class LionelMTHBridge:
                         except socket.timeout:
                             logger.debug("📥 Single-engine TR command timeout (normal)")
                         return True
+                except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                    logger.error(f"❌ Single-engine TR WTIU connection lost: {e}")
+                    self.mth_connected = False
+                    if self.mth_socket:
+                        try:
+                            self.mth_socket.close()
+                        except Exception:
+                            pass
+                        self.mth_socket = None
+                    return False
                 except Exception as e:
                     logger.error(f"❌ Single-engine TR command error: {e}")
                     return False
         
         try:
             with self.mth_lock:
+                # Rate limit: minimum 100ms between WTIU commands
+                if not hasattr(self, '_last_wtiu_command_time'):
+                    self._last_wtiu_command_time = 0
+                time_since_last = time.time() - self._last_wtiu_command_time
+                if time_since_last < 0.1:
+                    time.sleep(0.1 - time_since_last)
+                self._last_wtiu_command_time = time.time()
+
                 # All lashups use DCS engine 102 (0x66) - from Mark's RTC code
                 select_cmd = f"y{MTH_LASHUP_DCS_NO}\r\n"  # Always 102
                 self.mth_socket.send(select_cmd.encode())
@@ -5521,6 +5554,16 @@ class LionelMTHBridge:
                 
                 return True
                 
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            logger.error(f"❌ Lashup WTIU connection lost: {e}")
+            self.mth_connected = False
+            if self.mth_socket:
+                try:
+                    self.mth_socket.close()
+                except Exception:
+                    pass
+                self.mth_socket = None
+            return False
         except Exception as e:
             logger.error(f"❌ Lashup command error: {e}")
             return False
@@ -6985,7 +7028,7 @@ def check_bell_quick_press(self):
         
         return commands
 
-BRIDGE_VERSION = "v1.6.8"
+BRIDGE_VERSION = "v1.6.9"
 
 def main():
     print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")
