@@ -4592,6 +4592,16 @@ class LionelMTHBridge:
                     # Some commands like 'x' might not return immediately
                     return True  # Assume success for timeout
 
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            logger.error(f"❌ WTIU connection lost: {e}")
+            self.mth_connected = False
+            if self.mth_socket:
+                try:
+                    self.mth_socket.close()
+                except Exception:
+                    pass
+                self.mth_socket = None
+            return False
         except Exception as e:
             logger.error(f"❌ Command send error: {e}")
             return False
@@ -6654,7 +6664,7 @@ class LionelMTHBridge:
             except Exception as e:
                 logger.warning(f"Error closing Lionel serial: {e}")
 
-        if self.mcu_serial and hasattr(self.mcu_serial, 'is_open') and self.mcu_serial.is_open:
+        if hasattr(self, 'mcu_serial') and self.mcu_serial and hasattr(self.mcu_serial, 'is_open') and self.mcu_serial.is_open:
             try:
                 self.mcu_serial.close()
             except Exception as e:
