@@ -91,7 +91,7 @@ fi
 # --- Get current version (from the running service or file) ---
 CURRENT_VERSION="unknown"
 if command -v journalctl &> /dev/null; then
-    CURRENT_VERSION=$(journalctl -u "$SERVICE_NAME" --no-pager -n 50 2>/dev/null | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' | tail -1 || true)
+    CURRENT_VERSION=$(journalctl -u "$SERVICE_NAME" --no-pager -n 200 2>/dev/null | grep 'Bridge started' | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' | tail -1 || true)
 fi
 
 # --- Confirm with the user ---
