@@ -219,10 +219,22 @@ class Config:
             }
         }
     
+    @staticmethod
+    def deep_merge(defaults, user):
+        """Recursively merge user config into defaults so partial nested
+        sections don't wipe the rest of the defaults."""
+        result = dict(defaults)
+        for key, val in user.items():
+            if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+                result[key] = Config.deep_merge(result[key], val)
+            else:
+                result[key] = val
+        return result
+
     def load(self):
         if os.path.exists(self.config_file):
             with open(self.config_file, 'r') as f:
-                return {**self.defaults, **json.load(f)}
+                return Config.deep_merge(self.defaults, json.load(f))
         return self.defaults
     
     def save(self, config):
@@ -2848,26 +2860,35 @@ class LionelMTHBridge:
                 else:
                     logger.info(f"🔧 DEBUG: Quillable whistle OFF (toggled)")
                     return {'type': 'function', 'value': 'whistle_off'}
-            elif data_field == 0x12:  # Keypad 2 - PFA (Passenger/Freight Announcements)
-                logger.info(f"🔧 DEBUG: Keypad 2 - PFA detected")
-                return {'type': 'function', 'value': 'pfa'}
-            elif data_field == 0x13:  # Keypad 3
-                logger.info(f"🔧 DEBUG: Keypad 3 detected")
-                return {'type': 'function', 'value': 'idle_sound'}
+            elif data_field == 0x10:  # Keypad 0 - Numeric 0
+                logger.info(f"🔧 DEBUG: Keypad 0 - Numeric 0 detected")
+                return {'type': 'function', 'value': 'numeric_0'}
+            elif data_field == 0x11:  # (10001) - Button 1 = Volume UP
+                logger.info(f"🔧 DEBUG: Button 1 - Volume UP detected")
+                return {'type': 'function', 'value': 'volume_up'}
+            elif data_field == 0x12:  # Keypad 2 - Crew Talk (Cab Chatter toggle)
+                logger.info(f"🔧 DEBUG: Keypad 2 - Crew Talk detected")
+                return {'type': 'function', 'value': 'crew_talk'}
+            elif data_field == 0x13:  # Keypad 3 - RPM Up
+                logger.info(f"🔧 DEBUG: Keypad 3 - RPM Up detected")
+                return {'type': 'function', 'value': 'rpm_up'}
             elif data_field == 0x14:  # (10100) - Button 4 = Volume DOWN
                 logger.info(f"🔧 DEBUG: Button 4 - Volume DOWN detected")
                 return {'type': 'function', 'value': 'volume_down'}
             elif data_field == 0x15:  # Shutdown (10101)
                 return {'type': 'engine', 'value': 'shutdown'}
+            elif data_field == 0x16:  # Keypad 6 - RPM Down
+                logger.info(f"🔧 DEBUG: Keypad 6 - RPM Down detected")
+                return {'type': 'function', 'value': 'rpm_down'}
+            elif data_field == 0x17:  # Keypad 7 - Tower Comm (PFA)
+                logger.info(f"🔧 DEBUG: Keypad 7 - Tower Comm (PFA) detected")
+                return {'type': 'function', 'value': 'pfa'}
             elif data_field == 0x18:  # Keypad 8 - Smoke Down Cycle (max->med->min->off)
                 logger.info(f"🔧 DEBUG: Keypad 8 - Smoke Down detected")
                 return {'type': 'function', 'value': 'smoke_down'}
             elif data_field == 0x19:  # Keypad 9 - Smoke Up Cycle (off->min->med->max)
                 logger.info(f"🔧 DEBUG: Keypad 9 - Smoke Up detected")
                 return {'type': 'function', 'value': 'smoke_up'}
-            elif data_field == 0x11:  # (10001) - Button 1 = Volume UP
-                logger.info(f"🔧 DEBUG: Button 1 - Volume UP detected")
-                return {'type': 'function', 'value': 'volume_up'}
             elif data_field == 0x1C:  # Horn (11100) - Whistle button - HOLD MODE
                 # Update last whistle time for timeout detection
                 self.last_whistle_time = time.time()
@@ -3518,20 +3539,38 @@ class LionelMTHBridge:
                     logger.info(f" Legacy Numeric 5 → Shutdown")
                     return self.send_wtiu_command('u5')
                     
-                # CAB3 uses Numeric 2 for PFA announcements (WTIU WiFi mode)
+                # CAB3 Numeric 2 = Crew Talk (Cab Chatter toggle)
+                elif num == 2:
+                    engine = command.get('engine', self.current_lionel_engine)
+                    if not hasattr(self, '_cab_chatter_state'):
+                        self._cab_chatter_state = {}
+                    if not hasattr(self, '_crew_talk_debounce'):
+                        self._crew_talk_debounce = {}
+                    last_debounce = self._crew_talk_debounce.get(engine, 0)
+                    if current_time - last_debounce < 0.5:
+                        return True
+                    self._crew_talk_debounce[engine] = current_time
+                    current_state = self._cab_chatter_state.get(engine, False)
+                    new_state = not current_state
+                    self._cab_chatter_state[engine] = new_state
+                    mth_cmd = 'ab13' if new_state else 'ab14'
+                    logger.info(f" Legacy Numeric 2 → Crew Talk {'ON' if new_state else 'OFF'}: {mth_cmd}")
+                    return self.send_wtiu_command(mth_cmd)
+
+                # CAB3 Numeric 7 = Tower Comm (PFA announcements)
                 # First press: u1 to start, subsequent presses: m24 to advance
                 # After 60 seconds of inactivity: send u0 to end, then next press starts fresh with u1
-                elif num == 2:
+                elif num == 7:
                     engine = command.get('engine', self.current_lionel_engine)
                     last_pfa_time = self.pfa_direction.get(engine, 0)  # Timestamp of last press
                     pfa_active = self.pfa_state.get(engine, False)  # True if PFA is running
-                    
+
                     # Check if this engine is part of a lashup
                     train_id = command.get('train_id', 0)
                     mth_lashup_id = None
                     if train_id > 0:
                         mth_lashup_id = self.lashup_manager.get_mth_id_for_tr(train_id)
-                    
+
                     # If PFA was active but 60+ seconds since last press, end it first
                     if pfa_active and (current_time - last_pfa_time > 60):
                         logger.info(f" PFA Timeout: Engine {engine} → u0 (inactive for 60s)")
@@ -3541,9 +3580,9 @@ class LionelMTHBridge:
                             self.send_wtiu_command('u0')
                         self.pfa_state[engine] = False
                         pfa_active = False
-                    
+
                     self.pfa_direction[engine] = current_time  # Update timestamp
-                    
+
                     if not pfa_active:
                         # Start new PFA sequence
                         self.pfa_state[engine] = True
@@ -3561,9 +3600,9 @@ class LionelMTHBridge:
                         else:
                             logger.info(f" PFA Advance: Engine {engine} → m24")
                             return self.send_wtiu_command('m24')
-                    
+
                 # Other numerics -> idle sounds
-                elif num in [3, 6, 7, 8, 9]:
+                elif num in [3, 6, 8, 9]:
                     return self.send_wtiu_command(f'i{num}')
                 return True
             
@@ -5598,7 +5637,7 @@ class LionelMTHBridge:
                 'whistle_pitch_3': 'w2',
                 'whistle_pitch_4': 'w2',
                 'whistle_pitch_5': 'w2',
-                'horn2': 'w2',  # Blow Horn Two → same whistle
+                'horn2': 'n41',  # Blow Horn Two → Single Toot (distinct from primary whistle)
             },
             'smoke': {
                 'on': 'abF',
@@ -5664,10 +5703,69 @@ class LionelMTHBridge:
                 else:
                     logger.info(f"🔊 PFA Advance: Engine {engine} → m24")
                     return 'm24'
-            elif cmd_type == 'function' and cmd_value == 'idle_sound':
-                # Idle sound (Keypad 3)
-                logger.info(f"🔊 Idle sound: i3")
-                return 'i3'
+            elif cmd_type == 'function' and cmd_value == 'rpm_up':
+                # TMCC1 RPM Up (Keypad 3) - cycle rev level up
+                # MTH rev levels: 0=Drift(r17), 1=Normal(r15), 2=Labor(r16)
+                engine = self.current_lionel_engine
+                if not hasattr(self, 'engine_rev_level'):
+                    self.engine_rev_level = {}
+                if not hasattr(self, '_rpm_debounce_time'):
+                    self._rpm_debounce_time = {}
+                current_time = time.time()
+                last_debounce = self._rpm_debounce_time.get(engine, 0)
+                if current_time - last_debounce < 0.5:
+                    return None
+                self._rpm_debounce_time[engine] = current_time
+                current_level = self.engine_rev_level.get(engine, 1)  # Default Normal
+                new_level = min(2, current_level + 1)
+                self.engine_rev_level[engine] = new_level
+                rev_cmds = {0: 'r17', 1: 'r15', 2: 'r16'}
+                mth_cmd = rev_cmds[new_level]
+                level_names = {0: 'Drift', 1: 'Normal', 2: 'Labor'}
+                logger.info(f"🔧 RPM Up: Engine {engine} → {level_names[new_level]} ({mth_cmd})")
+                return mth_cmd
+            elif cmd_type == 'function' and cmd_value == 'rpm_down':
+                # TMCC1 RPM Down (Keypad 6) - cycle rev level down
+                engine = self.current_lionel_engine
+                if not hasattr(self, 'engine_rev_level'):
+                    self.engine_rev_level = {}
+                if not hasattr(self, '_rpm_debounce_time'):
+                    self._rpm_debounce_time = {}
+                current_time = time.time()
+                last_debounce = self._rpm_debounce_time.get(engine, 0)
+                if current_time - last_debounce < 0.5:
+                    return None
+                self._rpm_debounce_time[engine] = current_time
+                current_level = self.engine_rev_level.get(engine, 1)  # Default Normal
+                new_level = max(0, current_level - 1)
+                self.engine_rev_level[engine] = new_level
+                rev_cmds = {0: 'r17', 1: 'r15', 2: 'r16'}
+                mth_cmd = rev_cmds[new_level]
+                level_names = {0: 'Drift', 1: 'Normal', 2: 'Labor'}
+                logger.info(f"🔧 RPM Down: Engine {engine} → {level_names[new_level]} ({mth_cmd})")
+                return mth_cmd
+            elif cmd_type == 'function' and cmd_value == 'crew_talk':
+                # TMCC1 Crew Talk (Keypad 2) - toggle cab chatter on/off
+                engine = self.current_lionel_engine
+                if not hasattr(self, '_cab_chatter_state'):
+                    self._cab_chatter_state = {}
+                if not hasattr(self, '_crew_talk_debounce'):
+                    self._crew_talk_debounce = {}
+                current_time = time.time()
+                last_debounce = self._crew_talk_debounce.get(engine, 0)
+                if current_time - last_debounce < 0.5:
+                    return None
+                self._crew_talk_debounce[engine] = current_time
+                current_state = self._cab_chatter_state.get(engine, False)
+                new_state = not current_state
+                self._cab_chatter_state[engine] = new_state
+                mth_cmd = 'ab13' if new_state else 'ab14'
+                logger.info(f"💬 Crew Talk: Engine {engine} → {'ON' if new_state else 'OFF'} ({mth_cmd})")
+                return mth_cmd
+            elif cmd_type == 'function' and cmd_value == 'numeric_0':
+                # Numeric 0 (Keypad 0) - idle sound 0
+                logger.info(f"🔊 Numeric 0: i0")
+                return 'i0'
             elif cmd_type == 'function' and cmd_value == 'smoke_up':
                 # TMCC1 Smoke On (Keypad 9): simple on/off — no level cycling
                 engine = self.current_lionel_engine
@@ -6877,7 +6975,7 @@ def check_bell_quick_press(self):
         
         return commands
 
-BRIDGE_VERSION = "v1.6.7"
+BRIDGE_VERSION = "v1.6.8"
 
 def main():
     print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")
