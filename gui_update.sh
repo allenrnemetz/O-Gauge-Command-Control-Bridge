@@ -88,15 +88,15 @@ The systemd service file doesn't point to a valid directory.\n\
 You may need to reinstall using 'Install Bridge'."
 fi
 
-# --- Get current version (from the running service or file) ---
+# --- Get current version (from the source file — fast) ---
 CURRENT_VERSION="unknown"
-if command -v journalctl &> /dev/null; then
-    CURRENT_VERSION=$(journalctl -u "$SERVICE_NAME" --no-pager --since '7 days ago' 2>/dev/null | grep 'Bridge started' | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' | tail -1 || true)
+if [ -n "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/lionel_mth_bridge.py" ]; then
+    CURRENT_VERSION=$(grep -o 'BRIDGE_VERSION = "v[0-9]\+\.[0-9]\+\.[0-9]\+"' "$INSTALL_DIR/lionel_mth_bridge.py" | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' | tail -1 || true)
 fi
-# Fallback: read version from the source file if journal search failed
+# Fallback: check journalctl (last 100 lines only) if file grep failed
 if [ -z "$CURRENT_VERSION" ] || [ "$CURRENT_VERSION" = "unknown" ]; then
-    if [ -n "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/lionel_mth_bridge.py" ]; then
-        CURRENT_VERSION=$(grep -o 'BRIDGE_VERSION = "v[0-9]\+\.[0-9]\+\.[0-9]\+"' "$INSTALL_DIR/lionel_mth_bridge.py" | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' | tail -1 || true)
+    if command -v journalctl &> /dev/null; then
+        CURRENT_VERSION=$(journalctl -u "$SERVICE_NAME" --no-pager -n 100 2>/dev/null | grep 'Bridge started' | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' | tail -1 || true)
     fi
 fi
 
