@@ -91,12 +91,12 @@ fi
 # --- Get current version (from the source file — fast) ---
 CURRENT_VERSION="unknown"
 if [ -n "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/lionel_mth_bridge.py" ]; then
-    CURRENT_VERSION=$(grep -o 'BRIDGE_VERSION = "v[0-9]\+\.[0-9]\+\.[0-9]\+"' "$INSTALL_DIR/lionel_mth_bridge.py" | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' | tail -1 || true)
+    CURRENT_VERSION=$(grep -o 'BRIDGE_VERSION = "v[0-9]\+\.[0-9]\+\.[0-9]\+[a-z]*"' "$INSTALL_DIR/lionel_mth_bridge.py" | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+[a-z]*' | tail -1 || true)
 fi
 # Fallback: check journalctl (last 100 lines only) if file grep failed
 if [ -z "$CURRENT_VERSION" ] || [ "$CURRENT_VERSION" = "unknown" ]; then
     if command -v journalctl &> /dev/null; then
-        CURRENT_VERSION=$(journalctl -u "$SERVICE_NAME" --no-pager -n 100 2>/dev/null | grep 'Bridge started' | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' | tail -1 || true)
+        CURRENT_VERSION=$(journalctl -u "$SERVICE_NAME" --no-pager -n 100 2>/dev/null | grep 'Bridge started' | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+[a-z]*' | tail -1 || true)
     fi
 fi
 
