@@ -24,7 +24,7 @@ See connection status and engine libraries from both the Lionel Base 3 and MTH W
 
 - The bridge must be running version **1.4.0** or later (includes the HTTP status endpoint on port 8580)
 - [HACS](https://hacs.xyz) must be installed in your Home Assistant instance
-- Home Assistant and the bridge (Raspberry Pi) must be on the same network
+- Home Assistant and the bridge (Raspberry Pi or Linux PC) must be on the same network
 
 ## Installation
 
@@ -53,10 +53,10 @@ Alternatively, in HA:
 2. Search for "Lionel MTH Bridge"
 3. Enter the bridge IP and port
 
-> **Same machine as the bridge?** If Home Assistant is running on the same Raspberry Pi as the bridge:
+> **Same machine as the bridge?** If Home Assistant is running on the same machine as the bridge (Raspberry Pi or Linux PC):
 > - **HA Supervised (bare metal)**: use `localhost` or `127.0.0.1` as the bridge IP
-> - **HA Container (Docker)**: use the Pi's LAN IP (e.g. `192.168.1.50`), not `localhost` — inside a Docker container, `localhost` refers to the container itself, not the host
-> - **HAOS (Home Assistant OS)**: you cannot run the bridge on HAOS — it doesn't support systemd services or direct USB serial access. Run the bridge on a separate Pi.
+> - **HA Container (Docker)**: use the machine's LAN IP (e.g. `192.168.1.50`), not `localhost` — inside a Docker container, `localhost` refers to the container itself, not the host
+> - **HAOS (Home Assistant OS)**: you cannot run the bridge on HAOS — it doesn't support systemd services or direct USB serial access. Run the bridge on a separate Raspberry Pi or Linux PC.
 
 ### Step 3: Use
 

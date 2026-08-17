@@ -43,13 +43,13 @@ This bridge translates Lionel TMCC and Legacy commands to MTH DCS commands, lett
 | **Lionel Base 3** (6-82972) | Receives commands from remote |
 | **Lionel Remote** (Cab-1L, Cab-2, or Cab-3) | Your controller |
 | **Lionel LCS SER2** (6-81326) | Serial output from Base 3 |
-| **FTDI USB-Serial Adapter** | Connects SER2 to Raspberry Pi |
+| **FTDI USB-Serial Adapter** | Connects SER2 to your computer/Pi |
 | **MTH WTIU** (50-1039) | WiFi interface to DCS track |
-| **Raspberry Pi** (3B+, 4, or 5) | Runs the bridge software |
+| **Linux computer or Raspberry Pi** (3B+, 4, or 5) | Runs the bridge software |
 
 **Connection:**
 ```
-Remote → Base 3 → SER2 → FTDI → Raspberry Pi → WiFi → WTIU → Track
+Remote → Base 3 → SER2 → FTDI → Linux PC or Raspberry Pi → WiFi → WTIU → Track
 ```
 
 ---
@@ -101,25 +101,30 @@ See **START HERE.txt** in the download for plain-English instructions.
 
 ### Manual Install (terminal / SSH)
 
-### Step 1: Raspberry Pi Setup
+### Step 1: Linux / Raspberry Pi Setup
 
-1. Install **Raspberry Pi OS** (Lite or Desktop) on your Pi
-2. Connect to your WiFi network
+1. Install **Raspberry Pi OS** (Lite or Desktop) on your Pi, or use any Linux distribution (Ubuntu, Debian, Mint, Fedora, etc.) on a PC or mini PC
+2. Connect to your network
 3. Enable SSH if not already enabled:
    ```bash
    sudo raspi-config
    # Navigate to Interface Options → SSH → Enable
    ```
-4. Note your Pi's IP address:
+   On other Linux distributions, SSH is usually enabled via:
+   ```bash
+   sudo systemctl enable ssh
+   sudo systemctl start ssh
+   ```
+4. Note your machine's IP address:
    ```bash
    hostname -I
    ```
 
-> **Important:** Raspberry Pi and WTIU must be on the same network subnet
+> **Important:** The machine running the bridge and the WTIU must be on the same network subnet
 
 ### Step 2: Download the Bridge Software
 
-SSH into your Raspberry Pi and clone the repository:
+SSH into your Raspberry Pi or Linux machine and clone the repository:
 
 ```bash
 cd ~
@@ -130,12 +135,12 @@ cd lionel-mth-bridge
 Or copy the files manually via SCP:
 ```bash
 # From your computer:
-scp lionel_mth_bridge.py bridge_config.json install.sh lionel-mth-bridge.service main.py <username>@<pi-ip>:~/lionel-mth-bridge/
+scp lionel_mth_bridge.py bridge_config.json install.sh lionel-mth-bridge.service main.py <username>@<machine-ip>:~/lionel-mth-bridge/
 ```
 
 ### Step 3: Run the Installer
 
-SSH into your Raspberry Pi and run:
+SSH into your machine and run:
 
 ```bash
 cd ~/lionel-mth-bridge
@@ -152,7 +157,7 @@ The installer will:
 
 ### Step 4: Connect Hardware
 
-1. Connect the FTDI USB-Serial adapter to the Raspberry Pi's USB port
+1. Connect the FTDI USB-Serial adapter to a USB port on your Raspberry Pi or Linux PC
 2. Connect the FTDI cable's DB9 end to the LCS SER2
 
 ### Step 5: Add Engines to MTH WTIU
@@ -349,7 +354,7 @@ The bridge includes a TCP serial proxy that allows other applications like **PyT
 
 ### Connecting PyTrain
 
-The install script displays the PyTrain connection command with your Pi's IP address at the end of installation.
+The install script displays the PyTrain connection command with your machine's IP address at the end of installation.
 
 ### Configuration
 
@@ -473,7 +478,7 @@ The script will:
 
 **WTIU not connecting:**
 - Verify WTIU is powered and on WiFi
-- Check Raspberry Pi is on the same network subnet
+- Check your Raspberry Pi or Linux PC is on the same network subnet
 
 **No response from train:**
 - Verify engine is added to WTIU (use MTH app first)
