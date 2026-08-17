@@ -7001,7 +7001,7 @@ def check_bell_quick_press(self):
         
         return commands
 
-BRIDGE_VERSION = "v1.6.9"
+BRIDGE_VERSION = "v1.6.9a"
 
 def main():
     print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")
