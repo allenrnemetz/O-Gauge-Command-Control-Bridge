@@ -1,4 +1,4 @@
-"""The Lionel MTH Bridge integration.
+"""The O Gauge Command Control Bridge integration.
 
 Polls the bridge's HTTP status endpoint every 30 seconds and exposes
 connection status and engine library data as Home Assistant entities.
@@ -32,7 +32,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Lionel MTH Bridge from a config entry."""
+    """Set up O Gauge Command Control Bridge from a config entry."""
     host = entry.data[CONF_HOST]
     port = entry.data.get(CONF_PORT, 8580)
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Lionel MTH Bridge Installation Script
+# O Gauge Command Control Bridge Installation Script
 # Automatically installs dependencies and sets up the bridge
 #
 # Can be run interactively (default) or non-interactively by setting
@@ -10,7 +10,7 @@
 
 set -e  # Exit on any error
 
-echo "🚂 Lionel MTH Bridge Installation Script"
+echo "🚂 O Gauge Command Control Bridge Installation Script"
 echo "========================================"
 
 # Colors for output
@@ -371,7 +371,7 @@ SERVICE_FILE="/etc/systemd/system/lionel-mth-bridge.service"
 # Create service file content using the specified username
 # INSTALL_DIR was set earlier when we relocated to ~/lionel-mth-bridge
 SERVICE_CONTENT="[Unit]
-Description=Lionel MTH Bridge Service
+Description=O Gauge Command Control Bridge Service
 After=network-online.target
 Wants=network-online.target
 
@@ -422,7 +422,7 @@ print_status "Creating startup scripts..."
 # Main startup script
 cat > start_bridge.sh << 'EOF'
 #!/bin/bash
-# Start Lionel MTH Bridge
+# Start O Gauge Command Control Bridge
 
 # Get script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
@@ -443,7 +443,7 @@ source venv/bin/activate
 pip install -r requirements.txt 2>/dev/null || true
 
 # Start the bridge
-echo "🚂 Starting Lionel MTH Bridge..."
+echo "🚂 Starting O Gauge Command Control Bridge..."
 python3 lionel_mth_bridge.py
 EOF
 

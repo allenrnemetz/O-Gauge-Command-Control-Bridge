@@ -1,5 +1,5 @@
 #!/bin/bash
-# gui_update.sh - GUI updater for the Lionel MTH Bridge
+# gui_update.sh - GUI updater for the O Gauge Command Control Bridge
 # Downloads the latest release from GitHub, copies new files over the
 # existing installation, refreshes dependencies, and restarts the service.
 #
@@ -64,7 +64,7 @@ die() {
 if ! systemctl list-unit-files 2>/dev/null | grep -q "$SERVICE_NAME"; then
     zenity --info \
         --title="Bridge Not Installed" \
-        --text="The Lionel MTH Bridge doesn't appear to be installed on this system.\n\n\
+        --text="The O Gauge Command Control Bridge doesn't appear to be installed on this system.\n\n\
 If you haven't installed it yet, use 'Install Bridge' instead.\n\n\
 If you believe this is an error, check with:\n  sudo systemctl status lionel-mth-bridge" \
         --width=450 2>/dev/null
@@ -102,7 +102,7 @@ fi
 
 # --- Confirm with the user ---
 zenity --question \
-    --title="Update Lionel MTH Bridge" \
+    --title="Update O Gauge Command Control Bridge" \
     --text="This will update the bridge to the latest version from GitHub.\n\n\
 Install directory: $INSTALL_DIR\n\
 Current version:   ${CURRENT_VERSION:-unknown}\n\n\
@@ -343,7 +343,7 @@ while kill -0 $UPDATE_PID 2>/dev/null; do
     sleep 0.5
 done | zenity --progress \
     --title="Updating..." \
-    --text="Updating the Lionel MTH Bridge.\n\n\
+    --text="Updating the O Gauge Command Control Bridge.\n\n\
 Downloading and installing the latest version...\n\
 Please wait, this may take a minute." \
     --pulsate \
@@ -419,7 +419,7 @@ with open(config_path, 'w') as f:
 " 2>/dev/null
 
                 HA_INFO="\n\nHome Assistant endpoint: http://$HOST_IP:$HA_PORT/status\n\
-  To use with HA, install the 'Lionel MTH Bridge' integration via HACS.\n\
+  To use with HA, install the 'O Gauge Command Control Bridge' integration via HACS.\n\
   See the Home Assistant section in README.md for setup instructions."
 
                 # Restart the service so the endpoint starts
@@ -442,7 +442,7 @@ with open(config_path, 'w') as f:
             HA_ENABLED=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('ha_status',{}).get('enabled',True))" 2>/dev/null || echo "True")
             if [ "$HA_ENABLED" = "True" ]; then
                 HA_INFO="\n\nHome Assistant endpoint: http://$HOST_IP:$HA_PORT/status\n\
-  To use with HA, install the 'Lionel MTH Bridge' integration via HACS.\n\
+  To use with HA, install the 'O Gauge Command Control Bridge' integration via HACS.\n\
   See the Home Assistant section in README.md for setup instructions."
             fi
         fi

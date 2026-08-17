@@ -1,4 +1,4 @@
-"""Constants for the Lionel MTH Bridge integration."""
+"""Constants for the O Gauge Command Control Bridge integration."""
 
 import json
 import os

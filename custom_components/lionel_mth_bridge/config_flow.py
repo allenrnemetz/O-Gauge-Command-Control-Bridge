@@ -1,4 +1,4 @@
-"""Config flow for the Lionel MTH Bridge integration."""
+"""Config flow for the O Gauge Command Control Bridge integration."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ async def _test_connection(hass: HomeAssistant, host: str, port: int) -> bool:
 
 
 class LionelMthBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Lionel MTH Bridge."""
+    """Handle a config flow for O Gauge Command Control Bridge."""
 
     VERSION = 1
 
@@ -61,7 +61,7 @@ class LionelMthBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
 
             return self.async_create_entry(
-                title=f"Lionel MTH Bridge ({host})",
+                title=f"O Gauge Command Control Bridge ({host})",
                 data=user_input,
             )
 

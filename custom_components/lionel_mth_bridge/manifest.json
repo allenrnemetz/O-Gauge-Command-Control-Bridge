@@ -1,10 +1,10 @@
 {
     "domain": "lionel_mth_bridge",
-    "name": "Lionel MTH Bridge",
+    "name": "O Gauge Command Control Bridge",
     "documentation": "https://github.com/allenrnemetz/O-Gauge-Command-Control-Bridge",
     "issue_tracker": "https://github.com/allenrnemetz/O-Gauge-Command-Control-Bridge/issues",
     "codeowners": ["@allenrnemetz"],
     "config_flow": true,
     "iot_class": "local_polling",
-    "version": "1.6.9a"
+    "version": "1.6.9b"
 }

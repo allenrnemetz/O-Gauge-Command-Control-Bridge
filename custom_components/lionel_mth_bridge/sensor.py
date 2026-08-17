@@ -1,4 +1,4 @@
-"""Sensor platform for the Lionel MTH Bridge integration."""
+"""Sensor platform for the O Gauge Command Control Bridge integration."""
 
 from __future__ import annotations
 
@@ -48,14 +48,14 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Lionel MTH Bridge sensors from a config entry."""
+    """Set up O Gauge Command Control Bridge sensors from a config entry."""
     coordinator: LionelMthBridgeCoordinator = hass.data[DOMAIN][entry.entry_id]
     host = entry.data[CONF_HOST]
     port = entry.data.get(CONF_PORT, 8580)
 
     device_info = DeviceInfo(
         identifiers={(DOMAIN, f"{host}:{port}")},
-        name="Lionel MTH Bridge",
+        name="O Gauge Command Control Bridge",
         manufacturer="Allen Nemetz",
         model="O-Gauge Command Control Bridge",
         sw_version=SW_VERSION,

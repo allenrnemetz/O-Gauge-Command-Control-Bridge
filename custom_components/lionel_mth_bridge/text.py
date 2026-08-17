@@ -1,4 +1,4 @@
-"""Text platform for the Lionel MTH Bridge integration.
+"""Text platform for the O Gauge Command Control Bridge integration.
 
 Provides an editable text entity for each engine so the user can rename
 engines directly from the Home Assistant UI. The new name is sent to the
@@ -29,14 +29,14 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Lionel MTH Bridge text entities from a config entry."""
+    """Set up O Gauge Command Control Bridge text entities from a config entry."""
     coordinator: LionelMthBridgeCoordinator = hass.data[DOMAIN][entry.entry_id]
     host = entry.data[CONF_HOST]
     port = entry.data.get(CONF_PORT, 8580)
 
     device_info = DeviceInfo(
         identifiers={(DOMAIN, f"{host}:{port}")},
-        name="Lionel MTH Bridge",
+        name="O Gauge Command Control Bridge",
         manufacturer="Allen Nemetz",
         model="O-Gauge Command Control Bridge",
         sw_version=SW_VERSION,

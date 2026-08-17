@@ -1,6 +1,6 @@
-# Lionel MTH Bridge — Home Assistant Integration
+# O Gauge Command Control Bridge — Home Assistant Integration
 
-Monitor your O-Gauge Command Control Bridge from Home Assistant.
+Monitor your O Gauge Command Control Bridge from Home Assistant.
 See connection status and engine libraries from both the Lionel Base 3 and MTH WTIU, all in your HA dashboard.
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?category=integration&owner=allenrnemetz&repository=O-Gauge-Command-Control-Bridge)
@@ -38,7 +38,7 @@ Alternatively, in HA:
 1. Go to **HACS** → **Integrations**
 2. Click the three dots (top right) → **Custom repositories**
 3. Add `https://github.com/allenrnemetz/O-Gauge-Command-Control-Bridge` as type **Integration**
-4. Find "Lionel MTH Bridge" and click **Download**
+4. Find "O Gauge Command Control Bridge" and click **Download**
 5. **Restart Home Assistant** (Settings → System → Power → Restart)
 
 ### Step 2: Configure
@@ -50,7 +50,7 @@ Alternatively, in HA:
 
 Alternatively, in HA:
 1. Go to **Settings** → **Devices & Services** → **Add Integration**
-2. Search for "Lionel MTH Bridge"
+2. Search for "O Gauge Command Control Bridge"
 3. Enter the bridge IP and port
 
 > **Same machine as the bridge?** If Home Assistant is running on the same machine as the bridge (Raspberry Pi or Linux PC):

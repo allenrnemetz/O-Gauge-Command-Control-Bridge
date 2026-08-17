@@ -1,5 +1,5 @@
 #!/bin/bash
-# gui_install.sh - GUI installer for the Lionel MTH Bridge
+# gui_install.sh - GUI installer for the O Gauge Command Control Bridge
 # Uses zenity dialogs so non-savvy users can install without a terminal.
 # Falls back to the text-based install.sh if zenity is unavailable.
 #
@@ -80,8 +80,8 @@ die() {
 
 # --- Welcome dialog ---
 zenity --info \
-    --title="Lionel MTH Bridge Installer" \
-    --text="Welcome to the Lionel MTH Bridge Installer!\n\n\
+    --title="O Gauge Command Control Bridge Installer" \
+    --text="Welcome to the O Gauge Command Control Bridge Installer!\n\n\
 This wizard will install the bridge software that lets you control\n\
 MTH DCS trains with your Lionel Cab-1L, Cab-2, or Cab-3 remote.\n\n\
 You will need:\n\
@@ -274,7 +274,7 @@ while kill -0 $INSTALL_PID 2>/dev/null; do
     sleep 0.5
 done | zenity --progress \
     --title="Installing..." \
-    --text="Installing the Lionel MTH Bridge.\n\n\
+    --text="Installing the O Gauge Command Control Bridge.\n\n\
 This may take a minute or two. Please wait...\n\n\
   • Creating Python environment\n\
   • Installing dependencies\n\

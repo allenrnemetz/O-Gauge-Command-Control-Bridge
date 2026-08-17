@@ -1,5 +1,5 @@
 #!/bin/bash
-# Lionel MTH Bridge Updater
+# O Gauge Command Control Bridge Updater
 # Pull latest code, update dependencies, and restart service
 
 set -e
