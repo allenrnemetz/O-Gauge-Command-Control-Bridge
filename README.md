@@ -82,7 +82,7 @@ This method works on any Linux desktop with zenity and systemd. Supported platfo
 
 1. On the machine that will run the bridge (with its desktop screen visible), open a web browser and go to:
    ```
-   https://github.com/allenrnemetz/O-Gauge-Command-Control-Bridge-on-Pi/releases/latest
+   https://github.com/allenrnemetz/O-Gauge-Command-Control-Bridge/releases/latest
    ```
 2. Download **Source code (zip)** from the Assets section
 3. Extract the ZIP (right-click → Extract Here)
@@ -123,7 +123,7 @@ SSH into your Raspberry Pi and clone the repository:
 
 ```bash
 cd ~
-git clone https://github.com/allenrnemetz/O-Gauge-Command-Control-Bridge-on-Pi.git lionel-mth-bridge
+git clone https://github.com/allenrnemetz/O-Gauge-Command-Control-Bridge.git lionel-mth-bridge
 cd lionel-mth-bridge
 ```
 
@@ -379,7 +379,7 @@ Set `enabled` to `false` to disable the proxy if not needed.
 
 Monitor your bridge from Home Assistant — see connection status and engine libraries from both the Lionel Base 3 and MTH WTIU, all in your HA dashboard.
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?category=integration&owner=allenrnemetz&repository=O-Gauge-Command-Control-Bridge-on-Pi)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?category=integration&owner=allenrnemetz&repository=O-Gauge-Command-Control-Bridge)
 
 [![Add integration to Home Assistant](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start?domain=lionel_mth_bridge)
 

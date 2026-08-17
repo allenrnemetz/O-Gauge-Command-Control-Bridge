@@ -15,7 +15,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 cd "$SCRIPT_DIR"
 
 # --- Constants ---
-REPO="allenrnemetz/O-Gauge-Command-Control-Bridge-on-Pi"
+REPO="allenrnemetz/O-Gauge-Command-Control-Bridge"
 GITHUB_API="https://api.github.com/repos/$REPO/releases/latest"
 SERVICE_NAME="lionel-mth-bridge"
 
@@ -180,7 +180,7 @@ LOG_FILE="/tmp/lionel_mth_bridge_update_$$.log"
         exit 1
     }
 
-    # Find the extracted folder (named like O-Gauge-Command-Control-Bridge-on-Pi-1.3.0)
+    # Find the extracted folder (named like O-Gauge-Command-Control-Bridge-1.3.0)
     EXTRACTED_DIR=$(find "$TMP_DIR" -maxdepth 1 -type d -name "O-Gauge-*" | head -1)
     if [ -z "$EXTRACTED_DIR" ] || [ ! -d "$EXTRACTED_DIR" ]; then
         echo "FAILED: Could not find extracted files." >&2

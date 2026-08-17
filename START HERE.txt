@@ -29,7 +29,7 @@
 
   Open your web browser and go to:
 
-     https://github.com/allenrnemetz/O-Gauge-Command-Control-Bridge-on-Pi/releases/latest
+     https://github.com/allenrnemetz/O-Gauge-Command-Control-Bridge/releases/latest
 
   Scroll down to the "Assets" section and click:
 
@@ -49,7 +49,7 @@
   Find the downloaded file (usually in your Downloads
   folder). It will be named something like:
 
-     O-Gauge-Command-Control-Bridge-on-Pi-1.4.1.tar.gz
+     O-Gauge-Command-Control-Bridge-1.4.1.tar.gz
 
   Right-click it and choose:
 
