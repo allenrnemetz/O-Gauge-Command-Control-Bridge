@@ -3730,6 +3730,26 @@ class LionelMTHBridge:
         if self.mth_socket:
             self.mth_socket.close()
         return self.connect_mth()
+
+    def _mark_wtiu_connection_lost(self, reason):
+        """Mark the WTIU TCP connection as dead so the connection monitor reconnects.
+
+        Call this whenever a socket operation raises BrokenPipeError,
+        ConnectionResetError, or another OSError indicating the TCP link to
+        the WTIU is gone. The connection monitor polls every
+        `connection_check_interval` seconds and will call connect_mth() to
+        re-establish the link. Without this, a dead socket (e.g. WTIU reboot)
+        sits forever returning Broken pipe on every I0 poll because the
+        monitor still sees mth_connected == True.
+        """
+        logger.error(f"❌ WTIU connection lost: {reason}")
+        self.mth_connected = False
+        if self.mth_socket:
+            try:
+                self.mth_socket.close()
+            except Exception:
+                pass
+            self.mth_socket = None
     
     def discover_mth_engines(self):
         """Discover available MTH engines from WTIU using I0 command"""
@@ -3860,6 +3880,11 @@ class LionelMTHBridge:
                 
                 return len(self.available_mth_engines) > 0
                 
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            # Socket is dead (e.g. WTIU rebooted) — mark it so the connection
+            # monitor reconnects instead of looping on Broken pipe forever.
+            self._mark_wtiu_connection_lost(f"engine discovery failed: {e}")
+            return False
         except Exception as e:
             logger.error(f"❌ Engine discovery failed: {e}")
             return False
@@ -3946,6 +3971,9 @@ class LionelMTHBridge:
             
             self.mth_socket.settimeout(5.0)
             
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            # Socket is dead — mark it so the connection monitor reconnects.
+            self._mark_wtiu_connection_lost(f"capability query for engine {dcs_engine}: {e}")
         except Exception as e:
             logger.debug(f"⚠️ Failed to query capabilities for engine {dcs_engine}: {e}")
     
@@ -4566,14 +4594,7 @@ class LionelMTHBridge:
                     return True  # Assume success for timeout
 
         except (BrokenPipeError, ConnectionResetError, OSError) as e:
-            logger.error(f"❌ WTIU connection lost: {e}")
-            self.mth_connected = False
-            if self.mth_socket:
-                try:
-                    self.mth_socket.close()
-                except Exception:
-                    pass
-                self.mth_socket = None
+            self._mark_wtiu_connection_lost(f"command send error: {e}")
             return False
         except Exception as e:
             logger.error(f"❌ Command send error: {e}")
@@ -7001,7 +7022,7 @@ def check_bell_quick_press(self):
         
         return commands
 
-BRIDGE_VERSION = "v1.6.9b"
+BRIDGE_VERSION = "v1.7.0"
 
 def main():
     print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")
