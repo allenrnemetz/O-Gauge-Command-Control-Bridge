@@ -41,14 +41,15 @@ import logging
 import random
 import threading
 import time
-from typing import Dict, Iterable, List, Optional, Tuple
+from collections.abc import Callable, Iterable
+from typing import ClassVar
 
 logger = logging.getLogger(__name__)
 
 
 # ---------- TMCC Accessory parsing ----------
 
-def parse_tmcc_switch_or_accessory(packet: Iterable[int], cmd_type: Optional[int] = None) -> Optional[Dict[str, int]]:
+def parse_tmcc_switch_or_accessory(packet: Iterable[int], cmd_type: int | None = None) -> dict[str, int] | None:
     """Parse Switch (0x02) or Accessory (0x03) TMCC packets."""
     packet = list(packet)
     if len(packet) != 3 or packet[0] != 0xFE:
@@ -78,7 +79,7 @@ def parse_tmcc_switch_or_accessory(packet: Iterable[int], cmd_type: Optional[int
 class WLEDClient:
     def __init__(self, host: str = "192.168.0.10", port: int = 80, timeout: float = 5.0,
                  max_retries: int = 3, retry_delay: float = 1.0,
-                 on_reconnect: Optional[callable] = None) -> None:
+                 on_reconnect: Callable[..., None] | None = None) -> None:
         self.host = host
         self.port = port
         self.timeout = timeout
@@ -174,7 +175,7 @@ class DaylightCycle:
 
     # Default color keyframes (RGB) at virtual hours
     # 0=midnight, 6=sunrise, 12=noon, 18=sunset, 24=midnight
-    DEFAULT_KEYFRAMES = {
+    DEFAULT_KEYFRAMES: ClassVar[dict] = {
         0:  (40, 40, 100),     # midnight - visible blue glow
         5:  (50, 50, 120),     # pre-dawn - brighter blue
         6:  (255, 150, 80),    # sunrise orange
@@ -203,9 +204,9 @@ class DaylightCycle:
         moon_start: int = 0,
         moon_length: int = 5,
         lightning_every_n_cycles: int = 3,
-        keyframes: Optional[Dict[int, Tuple[int, int, int]]] = None,
+        keyframes: dict[int, tuple[int, int, int]] | None = None,
         update_interval: float = 1.0,
-        thunder_callback: Optional[callable] = None,  # Called after lightning with delay_ms
+        thunder_callback: Callable[[float], None] | None = None,  # Called after lightning with delay_ms
     ) -> None:
         self.client = client
         self.cycle_duration = cycle_duration_sec
@@ -218,12 +219,12 @@ class DaylightCycle:
         self.thunder_callback = thunder_callback
 
         self._running = False
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._cycle_count = 0
         self._start_time = 0.0
         self._last_lightning_time = 0.0
         self._storm_active = False
-        self._last_state: Optional[dict] = None  # cache last sent state for reconnect
+        self._last_state: dict | None = None  # cache last sent state for reconnect
         
         # Register reconnect callback with client
         self.client._on_reconnect = self._on_reconnect
@@ -244,15 +245,15 @@ class DaylightCycle:
         return int(a + (b - a) * t)
 
     def _lerp_color(
-        self, c1: Tuple[int, int, int], c2: Tuple[int, int, int], t: float
-    ) -> Tuple[int, int, int]:
+        self, c1: tuple[int, int, int], c2: tuple[int, int, int], t: float
+    ) -> tuple[int, int, int]:
         return (
             self._lerp(c1[0], c2[0], t),
             self._lerp(c1[1], c2[1], t),
             self._lerp(c1[2], c2[2], t),
         )
 
-    def _get_sky_color(self, virtual_hour: float) -> Tuple[int, int, int]:
+    def _get_sky_color(self, virtual_hour: float) -> tuple[int, int, int]:
         """Interpolate sky color for a fractional virtual hour (0-24)."""
         hours = sorted(self.keyframes.keys())
         # Find surrounding keyframes
@@ -324,12 +325,10 @@ class DaylightCycle:
                 return 0.3 * (1.0 - progress)
         return 0.0
 
-    def _do_random_flicker(self, sky_color: Tuple[int, int, int]) -> None:
+    def _do_random_flicker(self, sky_color: tuple[int, int, int]) -> None:
         """Flash random subset of LEDs briefly (distant lightning)."""
         # Pick random start and length for the flash (10-25% of strip)
-        flash_length = random.randint(self.led_count // 10, self.led_count // 4)
-        flash_start = random.randint(0, max(0, self.led_count - flash_length))
-        
+
         # Build individual LED colors: sky color everywhere, white in flash zone
         # Use effect 0 (solid) with individual pixel control via "i" array
         # Simpler approach: just do a quick full flash but dimmer (like distant lightning)
@@ -349,7 +348,7 @@ class DaylightCycle:
             logger.info(f"🌩️ Triggering distant thunder with {delay_ms}ms delay")
             threading.Thread(target=self.thunder_callback, args=(delay_ms,), daemon=True).start()
 
-    def _do_full_flash(self, sky_color: Tuple[int, int, int]) -> None:
+    def _do_full_flash(self, sky_color: tuple[int, int, int]) -> None:
         """Full bright flash on all LEDs (close lightning strike)."""
         # Multiple rapid flashes for dramatic effect (2-4 pulses)
         num_pulses = random.randint(2, 4)
@@ -382,7 +381,7 @@ class DaylightCycle:
             return True
         return night_index % self.lightning_every_n == 0
 
-    def _maybe_do_lightning(self, virtual_hour: float, sky_color: Tuple[int, int, int]) -> None:
+    def _maybe_do_lightning(self, virtual_hour: float, sky_color: tuple[int, int, int]) -> None:
         """Check if we should do lightning based on storm phase and randomness."""
         if not self._is_storm_night(virtual_hour):
             return
@@ -439,7 +438,7 @@ class DaylightCycle:
                 self._do_random_flicker(sky_color)
 
     # ---- WLED segment helpers ----
-    def _build_segments(self, sky_color: Tuple[int, int, int], virtual_hour: float) -> list:
+    def _build_segments(self, sky_color: tuple[int, int, int], virtual_hour: float) -> list:
         """Build WLED segment array: main sky + optional moon."""
         segments = []
         # Main sky segment (all LEDs) - use "mainseg" to ensure it's the primary
@@ -529,10 +528,10 @@ class WLEDController:
 
     def __init__(
         self,
-        mapping: Dict[Tuple[int, int], str],
+        mapping: dict[tuple[int, int], str],
         host: str = "192.168.0.10",
         port: int = 80,
-        pattern_presets: Optional[List[int]] = None,
+        pattern_presets: list[int] | None = None,
         timeout: float = 5.0,
         daylight_cycle: bool = False,
         cycle_duration_sec: float = 1800,
@@ -540,7 +539,7 @@ class WLEDController:
         moon_start: int = 0,
         moon_length: int = 5,
         lightning_every_n_cycles: int = 3,
-        thunder_callback: Optional[callable] = None,
+        thunder_callback: Callable[[float], None] | None = None,
         auto_start_daylight: bool = False,
     ) -> None:
         self.mapping = mapping
@@ -549,7 +548,7 @@ class WLEDController:
         self.pattern_index = 0
 
         # Daylight cycle - create but don't auto-start unless explicitly requested
-        self.daylight: Optional[DaylightCycle] = None
+        self.daylight: DaylightCycle | None = None
         if daylight_cycle:
             self.daylight = DaylightCycle(
                 client=self.client,
@@ -565,7 +564,12 @@ class WLEDController:
             if auto_start_daylight:
                 self.daylight.start()
 
-    def handle_packet(self, packet: Iterable[int], cmd_type: Optional[int] = None) -> bool:
+    def stop(self) -> None:
+        """Stop daylight cycle if running and clean up."""
+        if self.daylight:
+            self.daylight.stop()
+
+    def handle_packet(self, packet: Iterable[int], cmd_type: int | None = None) -> bool:
         parsed = parse_tmcc_switch_or_accessory(packet, cmd_type)
         if not parsed:
             return False
