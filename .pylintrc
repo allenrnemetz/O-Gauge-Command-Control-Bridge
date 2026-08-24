@@ -1,0 +1,8 @@
+[MESSAGES CONTROL]
+# W1203: logging-fstring-interpolation — f-strings in logger calls are
+# intentional for readability; the bridge is not a high-throughput logging
+# workload.
+# W0718: broad-exception-caught — `except Exception:` is intentional
+# throughout for best-effort cleanup (serial close, socket close, etc.)
+# where any failure should be swallowed, not crash the bridge.
+disable=W1203,W0718,W0719

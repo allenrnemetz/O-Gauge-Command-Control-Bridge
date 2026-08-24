@@ -46,19 +46,19 @@ except Exception:
 
 # Thunder sound player helper
 
-def play_thunder(delay_ms: int, sound_dir: str = "/home/pi/sounds", audio_device: str = "plughw:2,0") -> None:
+def play_thunder(delay_ms: int, sound_dir: str = "/home/pi/sounds", _audio_device: str = "plughw:2,0") -> None:
     """Play thunder sound after a delay (simulates distance from lightning).
-    
+
     Selects appropriate thunder file based on delay:
     - Close (< 400ms): "close thunder.wav"
     - Medium (400-1200ms): "thunder1.wav", "thunder2.wav" (generic)
     - Distant (1200-2000ms): "distant thunder.wav"
     - Very distant (> 2000ms): "very distant thunder.wav"
-    
+
     Args:
         delay_ms: Delay in milliseconds before playing thunder
         sound_dir: Directory containing thunder WAV files
-        audio_device: ALSA audio device (e.g. "plughw:2,0" for USB audio)
+        _audio_device: ALSA audio device (e.g. "plughw:2,0" for USB audio) - unused
     """
     time.sleep(delay_ms / 1000.0)
     
@@ -232,7 +232,7 @@ class Config:
 
     def load(self):
         if os.path.exists(self.config_file):
-            with open(self.config_file, 'r') as f:
+            with open(self.config_file, 'r', encoding='utf-8') as f:
                 return Config.deep_merge(self.defaults, json.load(f))
         return self.defaults
     
@@ -241,7 +241,7 @@ class Config:
         config_dir = os.path.dirname(self.config_file)
         if config_dir and not os.path.exists(config_dir):
             os.makedirs(config_dir, exist_ok=True)
-        with open(self.config_file, 'w') as f:
+        with open(self.config_file, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=2)
 
 class CommandQueue:
@@ -253,7 +253,8 @@ class CommandQueue:
         self.processing_interval = 0.01  # 10ms between commands
         self.last_command_time = {}
         self.command_cooldown = 0.05  # 50ms cooldown for same command type
-        
+        self.bridge: LionelMTHBridge | None = None  # set in start(); declared here for pylint W0201
+
     def start(self, bridge):
         self.bridge = bridge
         self.running = True
@@ -314,6 +315,8 @@ class CommandQueue:
                 command = self.queue.get(timeout=0.1)
                 if command:
                     # Process command
+                    if self.bridge is None:
+                        continue
                     success = self.bridge.send_to_mth(command)
                     if success:
                         logger.debug(f"✅ Processed: {command.get('type', 'unknown')}")
@@ -781,7 +784,7 @@ class CalibrationCurveManager:
             return None, None
         newest = max(matches, key=os.path.getmtime)
         try:
-            with open(newest, 'r') as f:
+            with open(newest, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             curve = data.get('curve', [])
             if not curve:
@@ -969,6 +972,7 @@ class LashupManager:
         self.engine_list_strings = {}  # {lionel_tr_id: engine_list_hex_string}
         self.lashup_created_on_wtiu = {}  # {lionel_tr_id: bool} - True if U command succeeded
         self.available_mth_ids = list(range(MTH_LASHUP_MIN, MTH_LASHUP_MAX + 1))
+        self._recycled_ids = []  # released lashup IDs recycled to end of queue
         self._load_mappings()
         
         # After restart, WTIU may have lost lashup state - mark all as needing recreation
@@ -981,7 +985,7 @@ class LashupManager:
         """Load persistent lashup mappings from file"""
         try:
             if os.path.exists(self.lashup_file):
-                with open(self.lashup_file, 'r') as f:
+                with open(self.lashup_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     self.tr_to_mth = {int(k): v for k, v in data.get('tr_to_mth', {}).items()}
                     self.mth_to_tr = {int(k): v for k, v in data.get('mth_to_tr', {}).items()}
@@ -1017,7 +1021,7 @@ class LashupManager:
                 'mth_engines_in_lashup': self.mth_engines_in_lashup,
                 'engine_list_strings': self.engine_list_strings
             }
-            with open(self.lashup_file, 'w') as f:
+            with open(self.lashup_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
             logger.info(f"💾 Saved {len(self.tr_to_mth)} lashup mappings to disk")
         except Exception as e:
@@ -1506,7 +1510,6 @@ class Base3WiFiClient:
             # BASE_MEMORY response header: cmd(1) + engine_id(1) + flags(1) + status(1)
             # + record_type(1) + start(4) + eeprom(1) + data_length(1) = 11 bytes
             resp_engine_id = unstuffed[1]
-            unstuffed[10]
             record_data = unstuffed[11:]  # After header
 
             if len(record_data) < 0xC0:
@@ -1662,7 +1665,7 @@ class PdiClient:
                             logger.info(f"📡 PDI SER2: Received {len(raw_bytes)} bytes: {raw_bytes.hex()}")
                             
                             # Also process consist commands that may be in this data
-                            self.bridge._process_consist_commands(raw_bytes)
+                            self.bridge.process_consist_commands(raw_bytes)
                             
                             for b in raw_bytes:
                                 if b == PDI_SOP:
@@ -1671,7 +1674,7 @@ class PdiClient:
                                 elif b == PDI_EOP and in_packet:
                                     # Complete packet received
                                     logger.info(f"📡 PDI SER2: Complete packet: {response_data.hex()}")
-                                    return self._parse_train_response(response_data)
+                                    return self.parse_train_response(response_data)
                                 elif in_packet:
                                     response_data.append(b)
                         else:
@@ -1738,7 +1741,7 @@ class PdiClient:
         logger.warning(f"📡 PDI: No matching packet found for train {train_id}")
         return None
     
-    def _parse_train_response(self, data: bytes) -> dict | None:
+    def parse_train_response(self, data: bytes) -> dict | None:
         """Parse PDI train response data"""
         try:
             # Unstuff the data
@@ -1854,7 +1857,7 @@ class PdiClient:
                             raw_bytes = self.bridge.lionel_serial.read(self.bridge.lionel_serial.in_waiting)
 
                             # Also process consist commands that may be in this data
-                            self.bridge._process_consist_commands(raw_bytes)
+                            self.bridge.process_consist_commands(raw_bytes)
 
                             for b in raw_bytes:
                                 if b == PDI_SOP:
@@ -1892,7 +1895,6 @@ class PdiClient:
             # cmd(1) + engine_id(1) + flags(1) + status(1) + record_type(1)
             # + start(4) + eeprom(1) + data_length(1) = 11 bytes, then data, then checksum(1)
             engine_id = unstuffed[1]
-            unstuffed[10]
             record_data = unstuffed[11:-1]  # Skip header and checksum
 
             if len(record_data) < 0xC0:
@@ -2260,7 +2262,7 @@ class StatusHTTPHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'error': 'Not found'}).encode())
 
-    def log_message(self, format, *args):
+    def log_message(self, format, *args):  # pylint: disable=redefined-builtin
         # Suppress default HTTP logging to avoid cluttering the log
         pass
 
@@ -2613,7 +2615,45 @@ class LionelMTHBridge:
         self._lashup_whistle_states = {}
         self._lashup_startup_debounce = {}
         self._lashup_shutdown_debounce = {}
-        self.discovered_wtiu = None
+        self.discovered_wtiu: dict | None = None
+        # Additional lazy-init attributes (declared here to satisfy pylint W0201;
+        # the conditional assignments in methods below remain as runtime guards).
+        self.monitor_thread = None
+        self._engine_tmcc_speed = {}
+        self._startup_debounce = {}
+        self._shutdown_debounce = {}
+        self._engine_headlight_state = {}
+        self._cab_chatter_state = {}
+        self._crew_talk_debounce = {}
+        self._last_wtiu_command_time = 0
+        self._last_selected_engine = None
+        self._lashup_creation_in_progress = False
+        self._consist_engine_direction = {}
+        self._lashup_current_speed = {}
+        self._lashup_direction_states = {}
+        self._lashup_tmcc_speed = {}
+        self._lashup_direction_debounce = {}
+        self._lashup_speed_throttle = {}
+        self._lashup_bell_states = {}
+        self._lashup_bell_debounce = {}
+        self._lashup_volume = {}
+        self._lashup_headlight_debounce = {}
+        self._lashup_headlight_state = {}
+        self._lashup_smoke_states = {}
+        self._lashup_u_cmd_in_progress = set()
+        self._pfa_debounce_time = {}
+        self.engine_rev_level = {}
+        self._rpm_debounce_time = {}
+        self._smoke_debounce_time = {}
+        self._headlight_debounce_time = {}
+        self._tmcc_buffer = bytearray()
+        self._consist_cmd_buffer = bytearray()
+        self._pending_consist_engines = {}
+        self._lashup_creation_timers = {}
+        self._consist_engine_position = {}
+        self.start_time = 0
+        self.status_server = None
+        self.whistle_monitor_thread = None
         
     def wait_for_lionel_connection(self):
         """Wait for SER2 to be available and connect"""
@@ -4002,7 +4042,7 @@ class LionelMTHBridge:
         """Load persisted engine mappings from file"""
         try:
             if os.path.exists(self.ENGINE_MAPPINGS_FILE):
-                with open(self.ENGINE_MAPPINGS_FILE, 'r') as f:
+                with open(self.ENGINE_MAPPINGS_FILE, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     self.discovered_mth_engines = data.get('discovered_mth_engines', {})
                     self.available_mth_engines = data.get('available_mth_engines', [])
@@ -4022,7 +4062,7 @@ class LionelMTHBridge:
                 'available_mth_engines': self.available_mth_engines,
                 'engine_names': self.engine_names
             }
-            with open(self.ENGINE_MAPPINGS_FILE, 'w') as f:
+            with open(self.ENGINE_MAPPINGS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
             logger.info(f"💾 Saved {len(self.discovered_mth_engines)} engine mappings to disk")
         except Exception as e:
@@ -4181,9 +4221,9 @@ class LionelMTHBridge:
                 def __init__(self, bridge):
                     self.bridge = bridge
 
-                def add_service(self, zeroconf, service_type, name):
+                def add_service(self, zc, type_, name):
                     try:
-                        info = zeroconf.get_service_info(service_type, name, timeout=3000)
+                        info = zc.get_service_info(type_, name, timeout=3000)
                     except Exception:
                         # Some WTIU firmware advertises service names with spaces
                         # which zeroconf rejects. Try to parse the info manually.
@@ -4194,13 +4234,13 @@ class LionelMTHBridge:
                             parts = name.split('.')
                             for i, p in enumerate(parts):
                                 if p.startswith('_') and p.endswith('-dcs'):
-                                    st = '.'.join(parts[i:]) if i < len(parts) - 1 else service_type
+                                    st = '.'.join(parts[i:]) if i < len(parts) - 1 else type_
                                     break
                             else:
-                                st = service_type
+                                st = type_
                             info = ServiceInfo(type_=st, name=name)
                             # Try reading from the zeroconf cache
-                            entries = zeroconf.cache.get_all_by_name(name)
+                            entries = zc.cache.get_all_by_name(name)  # pyright: ignore[reportAttributeAccessIssue]
                             if entries:
                                 for entry in entries:
                                     entry.as_service_info(info)
@@ -4219,10 +4259,10 @@ class LionelMTHBridge:
                         }
                         logger.info(f"🎯 Found WTIU: {name} at {addr}:{info.port}")
 
-                def remove_service(self, zeroconf, service_type, name):
+                def remove_service(self, zc, type_, name):
                     pass
 
-                def update_service(self, zeroconf, service_type, name):
+                def update_service(self, zc, type_, name):
                     pass
 
             zeroconf = Zeroconf()
@@ -4275,8 +4315,9 @@ class LionelMTHBridge:
                 logger.info("✅ mDNS discovery successful")
                 # Use discovered WTIU
                 if self.discovered_wtiu:
-                    mth_host = self.discovered_wtiu['host']
-                    mth_port = self.discovered_wtiu['port']
+                    wtiu_info = self.discovered_wtiu
+                    mth_host = wtiu_info['host']  # pylint: disable=unsubscriptable-object
+                    mth_port = wtiu_info['port']  # pylint: disable=unsubscriptable-object
                     logger.info(f"🎯 Using discovered WTIU: {mth_host}:{mth_port}")
             else:
                 logger.info("⚠️ mDNS discovery failed, trying fallback hosts")
@@ -5351,13 +5392,13 @@ class LionelMTHBridge:
                 
                 # Start timer to turn off whistle after 1.5s of no horn commands.
                 # See comment above re: WTIU flooding from rapid w2/bFFFD cycling.
-                def whistle_off():
+                def _whistle_off_timeout():
                     if self._lashup_whistle_states.get(whistle_key, False):
                         logger.info(f"🚂 TR{train_id} horn OFF (timeout) -> MTH lashup {mth_id}")
                         self.send_lashup_command(mth_id, "bFFFD", train_id)
                         self._lashup_whistle_states[whistle_key] = False
 
-                timer = threading.Timer(1.5, whistle_off)
+                timer = threading.Timer(1.5, _whistle_off_timeout)
                 timer.daemon = True
                 timer.start()
                 self._lashup_whistle_timers[whistle_key] = timer
@@ -5658,7 +5699,7 @@ class LionelMTHBridge:
                 'forward': 'd0',
                 'reverse': 'd1'
             },
-            'speed': lambda x: self.convert_speed(x),
+            'speed': self.convert_speed,
             'function': {
                 'horn': 'w2',
                 'bell': 'w4',
@@ -6039,7 +6080,7 @@ class LionelMTHBridge:
                             # Format: F8 <engine> 42/43 FB <engine> <data1> FB <engine> <data2>
                             # 0x42 = TRAIN_ADDRESS (assigns engine to train)
                             # 0x43 = TRAIN_UNIT (sets position: HEAD_FWD, TAIL_REV, etc.)
-                            self._process_consist_commands(data)
+                            self.process_consist_commands(data)
                             
                             # Buffer for handling fragmented TMCC packets
                             if not hasattr(self, '_tmcc_buffer'):
@@ -6255,7 +6296,7 @@ class LionelMTHBridge:
         
         return None
     
-    def _process_consist_commands(self, data: bytes):
+    def process_consist_commands(self, data: bytes):
         """Process 9-byte TRAIN_ADDRESS/TRAIN_UNIT multi-word commands for consist detection
         
         From Dave Swindell's analysis:
@@ -6510,7 +6551,7 @@ class LionelMTHBridge:
                                 # Action 0x02 = read response, 0x01 = write response
                                 if action in (0x01, 0x02) and len(packet) > 10:
                                     # This is consist data - parse it
-                                    result = self.pdi_client._parse_train_response(packet)
+                                    result = self.pdi_client.parse_train_response(packet)
                                     if result and result.get('consist_components'):
                                         components = result['consist_components']
                                         logger.info(f"📡 PDI Broadcast: TR{train_id} has {len(components)} engines")
@@ -6712,7 +6753,7 @@ class LionelMTHBridge:
             return
 
         # Handle SIGTERM (sent by systemd on stop) for clean shutdown
-        def _sigterm_handler(signum, frame):
+        def _sigterm_handler(_signum, _frame):
             logger.info("📡 Received SIGTERM signal")
             self.running = False
         signal.signal(signal.SIGTERM, _sigterm_handler)
@@ -6834,7 +6875,7 @@ class LionelMTHBridge:
             logger.error(f"Speck encryption error: {e}")
             return plaintext.encode('latin1')
 
-    def calibrate_legacy_speed(self, engine=1):
+    def calibrate_legacy_speed(self, _engine=1):
         """Calibrate Legacy speed mapping for smoother control"""
         logger.info("🎯 Starting Legacy speed calibration...")
         
@@ -6985,41 +7026,7 @@ def test_connection_manually():
     else:
         logger.error("❌ Failed to connect to MTH WTIU")
 
-def check_whistle_timeout(self):
-        """Check if whistle should be turned off due to timeout"""
-        if self.button_states.get('horn', False):
-            current_time = time.time()
-            if current_time - self.last_whistle_time > self.whistle_timeout:
-                # Turn off whistle due to timeout
-                self.button_states['horn'] = False
-                logger.info("🔧 DEBUG: Whistle TIMEOUT - Turning OFF")
-                return {'type': 'function', 'value': 'horn_off'}
-        return None
-
-def check_bell_quick_press(self):
-        """Check if bell button was released quickly (single ding) vs held (toggle)"""
-        current_time = time.time()
-        commands = []
-        
-        for engine, press_start in list(self.bell_button_press_time.items()):
-            hold_triggered = self.bell_hold_triggered.get(engine, False)
-            time_since_press = current_time - press_start
-            
-            # If button was pressed but no packets for 0.3s and hold wasn't triggered
-            # This means it was a quick press - send single bell hit
-            if 0.1 < time_since_press < 0.5 and not hold_triggered:
-                # Check if we're still receiving packets (button still held)
-                # If no recent packet, it was a quick release
-                last_packet_time = self.bell_button_press_time.get(engine, 0)
-                if current_time - last_packet_time > 0.15:
-                    # Quick press detected - single bell hit
-                    logger.info(f"🔔 Bell DING (quick press) for engine {engine}")
-                    self.bell_button_press_time[engine] = 0  # Reset
-                    commands.append({'type': 'bell', 'value': 'ding', 'engine': engine})
-        
-        return commands
-
-BRIDGE_VERSION = "v1.7.0"
+BRIDGE_VERSION = "v1.7.2"
 
 def main():
     print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")

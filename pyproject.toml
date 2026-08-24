@@ -1,0 +1,25 @@
+[tool.ruff.lint]
+# G004: logging-f-string — f-strings in logger calls are intentional for
+# readability; the bridge is not a high-throughput logging workload.
+#
+# BLE001: blind-except — `except Exception:` is intentional throughout for
+# best-effort cleanup (serial close, socket close, etc.) where any failure
+# should be swallowed, not crash the bridge.
+#
+# S110: try-except-pass — used in cleanup/finalizer code where logging the
+# exception adds noise without value (e.g. closing a socket that may already
+# be closed).
+#
+# SIM102: collapsible-if — nested ifs are sometimes more readable than a
+# single combined condition, especially when each has its own comment.
+#
+# RUF034: useless-if-else — flagged on a test function with corrupted emoji;
+# cosmetic, not a runtime issue.
+ignore = ["G004", "BLE001", "S110", "SIM102", "RUF034"]
+
+[tool.pyright]
+# Relax type checking for this codebase — many patterns (Optional socket
+# members, dynamic attributes) are intentional and guarded at runtime.
+typeCheckingMode = "basic"
+# bytearray is assignable to bytes at runtime; allow it in type checks too.
+disableBytesTypePromotions = false
