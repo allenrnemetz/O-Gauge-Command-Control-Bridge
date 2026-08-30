@@ -5,4 +5,11 @@
 # W0718: broad-exception-caught — `except Exception:` is intentional
 # throughout for best-effort cleanup (serial close, socket close, etc.)
 # where any failure should be swallowed, not crash the bridge.
-disable=W1203,W0718,W0719
+# R0903: too-few-public-methods — HA entity classes often have only one
+# public method (e.g., async_press or update).
+disable=W1203,W0718,W0719,R0903
+
+[TYPECHECK]
+# Home Assistant is not installed in the bridge development environment;
+# these imports are only valid when the component runs inside HA.
+ignored-modules=homeassistant
