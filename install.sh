@@ -118,7 +118,7 @@ if [ "$CURRENT_DIR" != "$INSTALL_DIR" ]; then
     for f in lionel_mth_bridge.py tmcc_wled.py install.sh gui_install.sh gui_update.sh \
              "START HERE.txt" \
              "Install (Easy Method).sh" "Update (Easy Method).sh" setup.sh \
-             README.md LICENSE bridge_config.json .gitignore .gitattributes; do
+             README.md LICENSE bridge_config.example.json .gitignore .gitattributes; do
         if [ -f "$CURRENT_DIR/$f" ]; then
             cp "$CURRENT_DIR/$f" "$INSTALL_DIR/" 2>/dev/null || true
         fi
@@ -205,7 +205,7 @@ mkdir -p "$CONFIG_DIR"
 # Copy default configuration if it doesn't exist
 if [ ! -f "$CONFIG_DIR/bridge_config.json" ]; then
     print_status "Creating default configuration..."
-    cp bridge_config.json "$CONFIG_DIR/bridge_config.json"
+    cp bridge_config.example.json "$CONFIG_DIR/bridge_config.json"
 else
     print_warning "Configuration already exists at $CONFIG_DIR/bridge_config.json"
 fi

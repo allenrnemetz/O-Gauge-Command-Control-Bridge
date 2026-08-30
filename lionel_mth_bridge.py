@@ -46,7 +46,7 @@ except Exception:
 
 # Thunder sound player helper
 
-def play_thunder(delay_ms: int, sound_dir: str = "/home/pi/sounds", _audio_device: str = "plughw:2,0") -> None:
+def play_thunder(delay_ms: int, sound_dir: str = "/home/arnemetz/Layout Sounds", _audio_device: str = "plughw:2,0") -> None:
     """Play thunder sound after a delay (simulates distance from lightning).
 
     Selects appropriate thunder file based on delay:
@@ -181,9 +181,9 @@ class Config:
                 "moon_start": 0,
                 "moon_length": 5,
                 "lightning_every_n_cycles": 0,
-                "sound_dir": "/home/pi/sounds",
+                "sound_dir": "/home/arnemetz/Layout Sounds",
                 "audio_device": "plughw:2,0",
-                "thunder_enabled": False,
+                "thunder_enabled": True,
                 "off_on_startup": False,
                 # Mapping: {"<acc_address>": {"<data_field>": "action"}}
                 "mapping": {
@@ -3571,7 +3571,7 @@ class LionelMTHBridge:
                         self.last_command_time['volume'] = current_time
                         self.master_volume = min(100, self.master_volume + self.volume_step)
                         logger.info(f" Legacy Numeric 1 → Volume Up: {self.master_volume}")
-                        return self.send_wtiu_command(f'v0{self.master_volume:03d}')  # v0 = master volume
+                        return self.send_wtiu_command(f'v0{self.master_volume}')  # v0 = master volume
                     return True  # Debounced, ignore
                     
                 # CAB3 uses Numeric 4 for volume down (with debouncing)
@@ -3581,7 +3581,7 @@ class LionelMTHBridge:
                         self.last_command_time['volume'] = current_time
                         self.master_volume = max(0, self.master_volume - self.volume_step)
                         logger.info(f" Legacy Numeric 4 → Volume Down: {self.master_volume}")
-                        return self.send_wtiu_command(f'v0{self.master_volume:03d}')  # v0 = master volume
+                        return self.send_wtiu_command(f'v0{self.master_volume}')  # v0 = master volume
                     return True  # Debounced, ignore
                     
                 # CAB3 uses Numeric 5 for shutdown - debounce to prevent flooding WTIU
@@ -5205,7 +5205,7 @@ class LionelMTHBridge:
             new_vol = min(100, current_vol + self.volume_step)
             self._lashup_volume[train_id] = new_vol
             logger.info(f"🚂 TR{train_id} volume up -> MTH lashup {mth_id} vol {new_vol}%")
-            self.send_lashup_command(mth_id, f"v0{new_vol:03d}", train_id)  # Master volume
+            self.send_lashup_command(mth_id, f"v0{new_vol}", train_id)  # Master volume
             return
         # 0x114 = Button 4 (Volume Down)
         if cmd_code == 0x114:
@@ -5213,7 +5213,7 @@ class LionelMTHBridge:
             new_vol = max(0, current_vol - self.volume_step)
             self._lashup_volume[train_id] = new_vol
             logger.info(f"🚂 TR{train_id} volume down -> MTH lashup {mth_id} vol {new_vol}%")
-            self.send_lashup_command(mth_id, f"v0{new_vol:03d}", train_id)  # Master volume
+            self.send_lashup_command(mth_id, f"v0{new_vol}", train_id)  # Master volume
             return
         # 0x115 = Button 5 (Quick Shutdown) - debounce to prevent flooding
         if cmd_code == 0x115:
@@ -5326,7 +5326,7 @@ class LionelMTHBridge:
             # MTH DCS master volume is 0-100, Legacy speed dial is 0-15
             dcs_vol = min(100, vol_level * 100 // 15)
             logger.info(f"🚂 TR{train_id} volume {vol_level} -> MTH lashup {mth_id} vol {dcs_vol}")
-            self.send_lashup_command(mth_id, f"v0{dcs_vol:03d}", train_id)  # Master volume
+            self.send_lashup_command(mth_id, f"v0{dcs_vol}", train_id)  # Master volume
             return
         
         # Startup/Shutdown sequences (from menu/extended) - use same debounce as quick startup
@@ -5935,7 +5935,7 @@ class LionelMTHBridge:
                 return None
             
             logger.info(f"🔧 DEBUG: Volume {direction} -> {self.master_volume}%")
-            return f"v0{self.master_volume:03d}"
+            return f"v0{self.master_volume}"
         except Exception as e:
             logger.error(f"❌ Volume conversion error: {e}")
             return None
@@ -7026,7 +7026,7 @@ def test_connection_manually():
     else:
         logger.error("❌ Failed to connect to MTH WTIU")
 
-BRIDGE_VERSION = "v1.7.2"
+BRIDGE_VERSION = "v1.7.3"
 
 def main():
     print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")
