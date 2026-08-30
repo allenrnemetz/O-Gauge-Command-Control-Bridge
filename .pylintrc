@@ -10,7 +10,7 @@
 # C and R are disabled because this project does not enforce Pylint's
 # full code-style and refactoring rules (line length, docstrings,
 # trailing whitespace, too-many-lines, etc.).
-disable=W1203,W0718,W0719,C,R
+disable=W1203,W0718,W0719,W0212,W0613,W0707,C,R
 
 [TYPECHECK]
 # Home Assistant and rpi_ws281x are not installed in the bridge

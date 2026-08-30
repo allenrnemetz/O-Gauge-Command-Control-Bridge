@@ -1,3 +1,4 @@
+# pylint: disable=import-error
 """Button platform for the O Gauge Command Control Bridge integration.
 
 Provides a "Refresh Engines" button that triggers a rescan of both

@@ -30,3 +30,14 @@ reportMissingImports = "none"
 # (e.g., domain=...) that Pyright cannot resolve without HA stubs installed.
 reportGeneralTypeIssues = "none"
 reportCallIssue = "none"
+# Home Assistant type stubs are not installed locally; suppress call/argument
+# type diagnostics that depend on them.
+reportArgumentType = "none"
+
+[tool.pylint."messages control"]
+# Same as .pylintrc — disabled categories for this codebase.
+disable = ["W1203", "W0718", "W0719", "W0212", "W0613", "W0707", "C", "R"]
+
+[tool.pylint.typecheck]
+# Same as .pylintrc — these optional runtime deps are not installed locally.
+ignored-modules = ["homeassistant", "rpi_ws281x"]

@@ -1,3 +1,4 @@
+# pylint: disable=import-error
 """Config flow for the O Gauge Command Control Bridge integration."""
 
 from __future__ import annotations

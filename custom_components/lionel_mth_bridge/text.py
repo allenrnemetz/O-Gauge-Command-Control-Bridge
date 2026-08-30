@@ -1,3 +1,4 @@
+# pylint: disable=import-error
 """Text platform for the O Gauge Command Control Bridge integration.
 
 Provides an editable text entity for each engine so the user can rename
