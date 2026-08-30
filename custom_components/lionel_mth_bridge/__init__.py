@@ -1,4 +1,4 @@
-# pylint: disable=import-error
+# pylint: disable=import-error,raise-missing-from
 """The O Gauge Command Control Bridge integration.
 
 Polls the bridge's HTTP status endpoint every 30 seconds and exposes

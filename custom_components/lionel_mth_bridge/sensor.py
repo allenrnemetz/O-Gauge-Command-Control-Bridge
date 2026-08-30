@@ -1,4 +1,4 @@
-# pylint: disable=import-error
+# pylint: disable=import-error,protected-access
 """Sensor platform for the O Gauge Command Control Bridge integration."""
 
 from __future__ import annotations
