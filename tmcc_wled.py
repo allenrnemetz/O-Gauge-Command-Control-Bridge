@@ -259,7 +259,7 @@ class DaylightCycle:
         # Find surrounding keyframes
         lower_h = hours[0]
         upper_h = hours[-1]
-        for i, h in enumerate(hours):
+        for h in hours:
             if h <= virtual_hour:
                 lower_h = h
             if h >= virtual_hour:

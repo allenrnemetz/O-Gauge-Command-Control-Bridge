@@ -23,3 +23,10 @@ ignore = ["G004", "BLE001", "S110", "SIM102", "RUF034"]
 typeCheckingMode = "basic"
 # bytearray is assignable to bytes at runtime; allow it in type checks too.
 disableBytesTypePromotions = false
+# Home Assistant is not installed in the bridge dev environment, so suppress
+# missing import diagnostics for the custom_component files.
+reportMissingImports = "none"
+# The Home Assistant ConfigFlow base class uses __init_subclass__ arguments
+# (e.g., domain=...) that Pyright cannot resolve without HA stubs installed.
+reportGeneralTypeIssues = "none"
+reportCallIssue = "none"

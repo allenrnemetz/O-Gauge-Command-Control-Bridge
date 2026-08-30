@@ -32,7 +32,7 @@ If `rpi_ws281x` is unavailable, the module gracefully degrades to logging-only
 from __future__ import annotations
 
 import logging
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ class WS2811Hardware:
         channel: int = 0,
     ) -> None:
         self.led_count = led_count
-        self.strip: Optional[PixelStrip] = None
+        self.strip: Any = None
 
         if PixelStrip is None:
             logger.warning("rpi_ws281x not installed; WS2811 output disabled (log-only mode)")

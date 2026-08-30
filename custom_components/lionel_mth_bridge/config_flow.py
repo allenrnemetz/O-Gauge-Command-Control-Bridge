@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_PORT
-from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 import aiohttp
 
@@ -19,7 +20,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 )
 
 
-async def _test_connection(hass: HomeAssistant, host: str, port: int) -> bool:
+async def _test_connection(host: str, port: int) -> bool:
     """Test if the bridge is reachable and returns valid status JSON."""
     url = f"http://{host}:{port}{STATUS_ENDPOINT}"
     try:
@@ -39,7 +40,7 @@ class LionelMthBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     async def async_step_user(
-        self, user_input: dict[str, any] | None = None
+        self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Handle the initial step."""
         if user_input is not None:
@@ -47,7 +48,7 @@ class LionelMthBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             port = user_input[CONF_PORT]
 
             # Test connection
-            ok = await _test_connection(self.hass, host, port)
+            ok = await _test_connection(host, port)
             if not ok:
                 return self.async_show_form(
                     step_id="user",
