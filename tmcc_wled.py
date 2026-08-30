@@ -1,3 +1,4 @@
+# pylint: disable=C,R,import-error
 """TMCC accessory -> WLED bridge (ESP32 at 192.168.0.10 by default).
 
 Listens for TMCC Accessory/Group packets (cmd_type 0b11) and maps address +

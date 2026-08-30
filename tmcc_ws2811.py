@@ -1,3 +1,4 @@
+# pylint: disable=C,R,import-error
 """TMCC accessory → WS2811 controller.
 
 This module is standalone so it can be imported without modifying the main

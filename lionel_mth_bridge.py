@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# pylint: disable=C,R
 """
 lionel_mth_bridge.py - Lionel Base 3 to MTH WTIU Bridge
 Uses FTDI serial adapter for reliable TMCC data capture
