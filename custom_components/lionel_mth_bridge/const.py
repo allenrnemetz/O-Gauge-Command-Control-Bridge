@@ -21,7 +21,7 @@ def _load_version() -> str:
     """Read the integration version from manifest.json."""
     try:
         manifest_path = os.path.join(os.path.dirname(__file__), "manifest.json")
-        with open(manifest_path) as f:
+        with open(manifest_path, encoding="utf-8") as f:
             return json.load(f).get("version", "unknown")
     except Exception:
         return "unknown"
