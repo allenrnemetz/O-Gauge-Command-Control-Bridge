@@ -3080,9 +3080,13 @@ class LionelMTHBridge:
                     # Send as DCS command
                     dcs_speed = processed['dcs_speed']
                     mth_cmd = f"s{dcs_speed}"
-                    
+
                     logger.info(f"🎯 Legacy→DCS: {processed['legacy_speed']}/199 → {dcs_speed}/120")
                     return self.send_wtiu_command(mth_cmd)
+                # Speed unchanged (Base 3 rebroadcasts every command) - nothing
+                # to send. Falling through to send_to_mth would fire a stray
+                # 'y' select and an "Unknown command" warning per repeat.
+                return True
                     
             # Legacy DIRECT direction commands (key advantage over TMCC1!)
             elif command.get('type') == 'direction':
@@ -3804,6 +3808,7 @@ class LionelMTHBridge:
         """
         logger.error(f"❌ WTIU connection lost: {reason}")
         self.mth_connected = False
+        self._last_selected_engine = None  # WTIU working-engine state unknown
         if self.mth_socket:
             try:
                 self.mth_socket.close()
@@ -3952,15 +3957,21 @@ class LionelMTHBridge:
         """Query engine capabilities - get engine name, type, and ProtoWhistle support"""
         assert self.mth_socket is not None
         try:
-            # First select the engine
-            self.mth_socket.settimeout(2.0)
-            self.mth_socket.send(f"y{dcs_engine}\r\n".encode())
-            self.mth_socket.recv(256)  # Discard response
-            
-            # Query engine info - need full response for capability bytes
-            cmd = f"I{dcs_engine}\r\n"
-            self.mth_socket.send(cmd.encode())
-            response = self.mth_socket.recv(4096).decode('latin-1')
+            # Hold mth_lock so this can't interleave between a command path's
+            # 'y' select and its command. Update _last_selected_engine to keep
+            # the bookkeeping honest - this 'y' really does move the WTIU's
+            # working engine.
+            with self.mth_lock:
+                # First select the engine
+                self.mth_socket.settimeout(2.0)
+                self.mth_socket.send(f"y{dcs_engine}\r\n".encode())
+                self.mth_socket.recv(256)  # Discard response
+                self._last_selected_engine = dcs_engine
+
+                # Query engine info - need full response for capability bytes
+                cmd = f"I{dcs_engine}\r\n"
+                self.mth_socket.send(cmd.encode())
+                response = self.mth_socket.recv(4096).decode('latin-1')
             logger.info(f"🔍 I{dcs_engine} response ({len(response)} bytes): {response.strip()[:200]}...")
             
             # Parse response: Ixx:YY;EngineName;HH,HH,...;01 okay
@@ -4302,6 +4313,7 @@ class LionelMTHBridge:
         """Connect to MTH WTIU via WiFi with mDNS discovery"""
         self.mth_socket = None
         self.mth_connected = False
+        self._last_selected_engine = None  # Fresh connection = unknown working engine (RTC: LastEngine=127 on connect)
         
         # Use mDNS-first approach with fallback
         mth_host = None
@@ -4597,6 +4609,55 @@ class LionelMTHBridge:
             logger.error(f"❌ PC connection failed: {e}")
             return False
     
+    def _select_wtiu_engine(self, mth_engine):
+        """Select the working engine on the WTIU ('y' command).
+
+        Must be called with self.mth_lock held. Mirrors Mark DiVecchio's RTC
+        model: one serialized path owns engine selection and every response
+        is consumed. Stale RX data is flushed first so a late-arriving reply
+        can't be mistaken for the selection ACK, then the 'y' response is
+        read so it can't contaminate the next command's recv().
+
+        On a sane reply the selection bookkeeping is updated; on any failure
+        _last_selected_engine is invalidated (None = unknown, forces a
+        reselect next command) and False is returned so the caller can skip
+        sending a command that would land on the wrong engine.
+        """
+        try:
+            # Flush stale data so we read THIS command's response
+            self.mth_socket.setblocking(False)
+            try:
+                while True:
+                    stale = self.mth_socket.recv(512)
+                    if not stale:
+                        break
+                    logger.debug(f"📥 Flushed stale data before engine select: {stale[:50]}")
+            except (OSError, BlockingIOError):
+                pass  # No more data to flush
+            self.mth_socket.setblocking(True)
+            self.mth_socket.settimeout(1.0)
+
+            self.mth_socket.send(f"y{mth_engine}\r\n".encode())
+            try:
+                response = self.mth_socket.recv(256).decode('latin-1')
+            except socket.timeout:
+                response = ""
+            if "okay" in response.lower() or f"y{mth_engine}" in response:
+                self._last_selected_engine = mth_engine
+                logger.info(f"🎯 Selected MTH engine {mth_engine}")
+                return True
+            logger.warning(f"⚠️ Engine select y{mth_engine} not confirmed (got {response.strip()!r}) - selection state unknown")
+            self._last_selected_engine = None
+            return False
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self._last_selected_engine = None
+            raise
+        except Exception:
+            self._last_selected_engine = None
+            return False
+        finally:
+            self.mth_socket.setblocking(True)
+
     def send_wtiu_command(self, command, engine=None):
         """Send command to WTIU in exact ESP8266 format"""
         try:
@@ -4622,11 +4683,9 @@ class LionelMTHBridge:
             # to prevent interleaved commands from other threads
             assert self.mth_socket is not None
             with self.mth_lock:
-                if mth_engine != getattr(self, '_last_selected_engine', None):
-                    select_cmd = f"y{mth_engine}\r\n".encode()
-                    self.mth_socket.send(select_cmd)
-                    self._last_selected_engine = mth_engine
-                    logger.info(f"🎯 Selected MTH engine {mth_engine}")
+                if mth_engine != self._last_selected_engine:
+                    if not self._select_wtiu_engine(mth_engine):
+                        return False
                     time.sleep(0.05)  # Brief delay after engine selection
 
                 # Send command directly
@@ -4748,6 +4807,7 @@ class LionelMTHBridge:
                                     select_head_cmd = f"y{head_engine_dcs}\r\n"
                                     logger.info(f"🔗 Selecting head engine {head_engine_dcs} for lashup")
                                     self.mth_socket.send(select_head_cmd.encode())
+                                    self._last_selected_engine = head_engine_dcs
                                     time.sleep(0.1)
                                     try:
                                         head_response = self.mth_socket.recv(256).decode('latin-1')
@@ -5514,8 +5574,8 @@ class LionelMTHBridge:
                         # lost with "DCS timeout". Re-selecting y<engine> each
                         # time keeps the RF link alive, same as the multi-engine
                         # lashup path which always sends y102 before each command.
-                        self.mth_socket.send(f"y{dcs_engine}\r\n".encode())
-                        self._last_selected_engine = dcs_engine
+                        if not self._select_wtiu_engine(dcs_engine):
+                            return False
                         time.sleep(0.05)
                         self.mth_socket.send(f"{mth_cmd}\r\n".encode('latin-1'))
                         logger.info(f"🚂 TR{train_id} (single MTH engine {dcs_engine}) -> {mth_cmd}")
@@ -5554,6 +5614,7 @@ class LionelMTHBridge:
                 # All lashups use DCS engine 102 (0x66) - from Mark's RTC code
                 select_cmd = f"y{MTH_LASHUP_DCS_NO}\r\n"  # Always 102
                 self.mth_socket.send(select_cmd.encode())
+                self._last_selected_engine = MTH_LASHUP_DCS_NO
                 time.sleep(0.05)
                 
                 # Get engine list for this lashup (already includes comma prefix)
@@ -5652,41 +5713,30 @@ class LionelMTHBridge:
             return False
         
         try:
-            with self.mth_lock:
-                # Select the correct engine based on TMCC packet
-                if self.current_lionel_engine > 0:
-                    # Get MTH engine using new mapping system
-                    wtiu_engine = self.get_mth_engine(self.current_lionel_engine)
-                    
-                    if wtiu_engine:
-                        # Send engine selection command first
-                        logger.info(f"🔧 Selecting WTIU Engine #{wtiu_engine} for Lionel Engine #{self.current_lionel_engine}")
-                        select_cmd = f"y{wtiu_engine}\r\n"
-                        self.mth_socket.send(select_cmd.encode())
-                        time.sleep(0.1)  # Brief pause for engine selection
-                        try:
-                            select_response = self.mth_socket.recv(256).decode('latin-1')
-                            logger.info(f"🔍 Engine selection response: {select_response.strip()}")
-                        except Exception:
-                            pass  # Don't fail if no response to selection
-                    else:
-                        logger.warning(f"⚠️ No MTH engine mapping for Lionel Engine #{self.current_lionel_engine}")
-                        return False
-                
-                # Convert command to MTH protocol format
-                mth_cmd = self.convert_to_mth_protocol(command)
-                if mth_cmd:
-                    # Send command in ESP8266 format
-                    success = self.send_wtiu_command(mth_cmd)
-                    
-                    # Check if command was successful
-                    if success:
-                        logger.info("✅ Command sent successfully")
-                        return True
-                    else:
-                        logger.warning(f"⚠️ Command failed: {mth_cmd}")
-                        return False
-                    
+            # Verify this Lionel engine has a confirmed MTH mapping.
+            # send_wtiu_command performs the 'y' engine select itself under
+            # mth_lock - a second select here would desync _last_selected_engine
+            # (and holding mth_lock across that call deadlocks the plain Lock).
+            if self.current_lionel_engine > 0:
+                wtiu_engine = self.get_mth_engine(self.current_lionel_engine)
+                if not wtiu_engine:
+                    logger.warning(f"⚠️ No MTH engine mapping for Lionel Engine #{self.current_lionel_engine}")
+                    return False
+
+            # Convert command to MTH protocol format
+            mth_cmd = self.convert_to_mth_protocol(command)
+            if mth_cmd:
+                # Send command in ESP8266 format
+                success = self.send_wtiu_command(mth_cmd)
+
+                # Check if command was successful
+                if success:
+                    logger.info("✅ Command sent successfully")
+                    return True
+                else:
+                    logger.warning(f"⚠️ Command failed: {mth_cmd}")
+                    return False
+
         except Exception as e:
             logger.error(f"MTH send error: {e}")
             self.mth_connected = False
@@ -7027,7 +7077,7 @@ def test_connection_manually():
     else:
         logger.error("❌ Failed to connect to MTH WTIU")
 
-BRIDGE_VERSION = "v1.7.3"
+BRIDGE_VERSION = "v1.7.4"
 
 def main():
     print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")
