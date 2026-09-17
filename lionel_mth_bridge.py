@@ -3401,41 +3401,29 @@ class LionelMTHBridge:
                 if mth_lashup_id:
                     # This is a lashup - send smoke command to lashup
                     # Also sync smoke_states so cycling commands stay in sync
-                    smoke_state_map = {'off': 0, 'low': 1, 'med': 2, 'high': 3}
-                    if value in smoke_state_map:
-                        self.smoke_states[engine] = smoke_state_map[value]
-                    if value == 'off':
-                        logger.info(f"💨 TR{engine} smoke OFF -> MTH lashup {mth_lashup_id}")
-                        return self.send_lashup_command(mth_lashup_id, "abE", engine)
-                    elif value == 'low':
-                        logger.info(f"💨 TR{engine} smoke LOW -> MTH lashup {mth_lashup_id}")
-                        return self.send_lashup_command(mth_lashup_id, "ab12", engine)
-                    elif value == 'med':
-                        logger.info(f"💨 TR{engine} smoke MED -> MTH lashup {mth_lashup_id}")
-                        return self.send_lashup_command(mth_lashup_id, "ab11", engine)
-                    elif value == 'high':
-                        logger.info(f"💨 TR{engine} smoke HIGH -> MTH lashup {mth_lashup_id}")
-                        return self.send_lashup_command(mth_lashup_id, "ab10", engine)
+                    smoke_cmds = {'off': 'abE', 'low': 'ab12', 'med': 'ab11', 'high': 'ab10'}
+                    if value in smoke_cmds:
+                        was_off = self.smoke_states.get(engine, 0) == 0
+                        self.smoke_states[engine] = {'off': 0, 'low': 1, 'med': 2, 'high': 3}[value]
+                        logger.info(f"💨 TR{engine} smoke {value.upper()} -> MTH lashup {mth_lashup_id}")
+                        if value != 'off' and was_off:
+                            # DCS smoke has separate on/off and level controls -
+                            # an 'off' unit ignores level commands until abF
+                            self.send_lashup_command(mth_lashup_id, "abF", engine)
+                        return self.send_lashup_command(mth_lashup_id, smoke_cmds[value], engine)
                     return True
 
                 # Single engine smoke control - send to the engine addressed
                 # in the packet, not whatever was last selected
-                if value == 'off':
-                    self.smoke_states[engine] = 0
-                    logger.info(f"💨 Smoke OFF (direct) for engine {engine}")
-                    return self.send_wtiu_command('abE', engine)
-                elif value == 'low':
-                    self.smoke_states[engine] = 1
-                    logger.info(f"💨 Smoke LOW (direct) for engine {engine}")
-                    return self.send_wtiu_command('ab12', engine)
-                elif value == 'med':
-                    self.smoke_states[engine] = 2
-                    logger.info(f"💨 Smoke MED (direct) for engine {engine}")
-                    return self.send_wtiu_command('ab11', engine)
-                elif value == 'high':
-                    self.smoke_states[engine] = 3
-                    logger.info(f"💨 Smoke HIGH (direct) for engine {engine}")
-                    return self.send_wtiu_command('ab10', engine)
+                smoke_cmds = {'off': 'abE', 'low': 'ab12', 'med': 'ab11', 'high': 'ab10'}
+                if value in smoke_cmds:
+                    was_off = self.smoke_states.get(engine, 0) == 0
+                    self.smoke_states[engine] = {'off': 0, 'low': 1, 'med': 2, 'high': 3}[value]
+                    logger.info(f"💨 Smoke {value.upper()} (direct) for engine {engine}")
+                    if value != 'off' and was_off:
+                        # Turn the smoke unit back on before setting the level
+                        self.send_wtiu_command('abF', engine)
+                    return self.send_wtiu_command(smoke_cmds[value], engine)
                 return True
 
             # Legacy lighting_direct commands from multi-word 0xFB packets
@@ -3478,6 +3466,8 @@ class LionelMTHBridge:
 
                     if new_state == 1:
                         logger.info(f"💨 Smoke LOW for engine {engine}")
+                        # DCS smoke on/off is separate from level - abF first
+                        self.send_wtiu_command('abF', engine)
                         return self.send_wtiu_command('ab12', engine)  # Min
                     elif new_state == 2:
                         logger.info(f"💨 Smoke MED for engine {engine}")
@@ -5447,6 +5437,9 @@ class LionelMTHBridge:
             self._lashup_smoke_states[train_id] = new_state
             smoke_cmds = {0: 'abE', 1: 'ab12', 2: 'ab11', 3: 'ab10'}  # off, min, med, max
             logger.info(f"🚂 TR{train_id} smoke up (btn 9) -> level {new_state} -> MTH lashup {mth_id}")
+            if current_state == 0 and new_state > 0:
+                # DCS smoke on/off is separate from level - abF first
+                self.send_lashup_command(mth_id, "abF", train_id)
             self.send_lashup_command(mth_id, smoke_cmds.get(new_state, 'abE'), train_id)
             return
         
@@ -7164,7 +7157,7 @@ def test_connection_manually():
     else:
         logger.error("❌ Failed to connect to MTH WTIU")
 
-BRIDGE_VERSION = "v1.7.6"
+BRIDGE_VERSION = "v1.7.7"
 
 def main():
     print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")
