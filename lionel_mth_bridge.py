@@ -3892,51 +3892,51 @@ class LionelMTHBridge:
             if new_available_engines:
                 logger.info(f"✅ Found {len(new_available_engines)} MTH engines: {new_available_engines}")
 
-                # Clean up discovered mappings for engines no longer present
                 with self.engine_data_lock:
-                    stale = [k for k, v in self.discovered_mth_engines.items()
-                             if v not in new_available_engines and k not in self.engine_mappings]
-                    for k in stale:
-                        old_mth = self.discovered_mth_engines.pop(k)
-                        logger.info(f"🔗 Removed stale mapping Lionel #{k} → MTH #{old_mth}")
-
-                # Merge new engines with existing - update mapping if engine changed
-                for mth_engine in new_available_engines:
-                    lionel_addr = mth_engine - 1
-                    if lionel_addr > 0:
+                    # NOTE: engines missing from I0 keep their mappings. I0 is a
+                    # roll-call of engines responding right now - a quiet engine
+                    # (track power off, in-session, RF miss) is not proof its
+                    # mapping is stale. Mappings only change on positive
+                    # discovery: see _reconcile_mth_identities().
+                    for mth_engine in sorted(new_available_engines):
+                        lionel_addr = mth_engine - 1
+                        if lionel_addr <= 0:
+                            continue
                         # Skip if manually configured
                         if str(lionel_addr) in self.engine_mappings:
                             logger.debug(f"🔗 Lionel #{lionel_addr} has manual mapping, skipping")
                             continue
-                        
-                        # Check if already mapped to same engine
-                        existing = self.discovered_mth_engines.get(str(lionel_addr))
-                        if existing == mth_engine:
-                            logger.debug(f"🔗 Lionel #{lionel_addr} already mapped to MTH #{mth_engine}")
-                        elif existing is not None:
-                            # Different engine at same address - overwrite
-                            old_name = self.engine_names.get(str(existing), "Unknown")
-                            self.discovered_mth_engines[str(lionel_addr)] = mth_engine
-                            logger.info(f"🔗 Updated Lionel #{lionel_addr}: MTH #{existing} ({old_name}) → MTH #{mth_engine}")
-                        else:
-                            # New mapping
-                            self.discovered_mth_engines[str(lionel_addr)] = mth_engine
-                            logger.info(f"🔗 Auto-mapped Lionel #{lionel_addr} → MTH #{mth_engine}")
-                
-                # Replace available engines list with what I0 actually found.
-                # Merging with old persisted data causes stale engines (e.g. 6, 11)
-                # to persist forever even after they're removed from the WTIU.
-                with self.engine_data_lock:
+                        # One Lionel owner per MTH engine, and never steal a
+                        # Lionel ID that already has an engine (it may just be
+                        # quiet this scan)
+                        if (mth_engine in self.discovered_mth_engines.values()
+                                or str(lionel_addr) in self.discovered_mth_engines):
+                            continue
+                        self.discovered_mth_engines[str(lionel_addr)] = mth_engine
+                        logger.info(f"🔗 Auto-mapped Lionel #{lionel_addr} → MTH #{mth_engine}")
+
+                    # Replace available engines list with what I0 actually found.
+                    # Merging with old persisted data causes stale engines (e.g. 6, 11)
+                    # to persist forever even after they're removed from the WTIU.
                     self.available_mth_engines = list(new_available_engines)
                     engines_to_query = list(self.available_mth_engines)
+                    # Names recorded before this scan - the reconcile pass uses
+                    # them to tell a moved engine from a different locomotive
+                    prev_names = dict(self.engine_names)
 
                 # Query capabilities for each engine (also gets engine names)
+                fresh_names = {}
                 for dcs_engine in engines_to_query:
-                    self.query_engine_capabilities(dcs_engine)
-                
+                    name = self.query_engine_capabilities(dcs_engine)
+                    if name:
+                        fresh_names[dcs_engine] = name
+
+                # Follow engines that were re-discovered at a new DCS address
+                self._reconcile_mth_identities(new_available_engines, prev_names, fresh_names)
+
                 # Save mappings to disk
                 self._save_engine_mappings()
-                
+
                 return True
             else:
                 logger.info("ℹ️ No MTH engines found via I0 (WTIU engine database is empty)")
@@ -4035,10 +4035,17 @@ class LionelMTHBridge:
 
                         # Store engine name for display
                         self.engine_names[str(dcs_engine)] = engine_name
-                    
-                    self.protowhistle_capable[lionel_engine] = has_protowhistle
-                    
+
+                        # Flag every Lionel ID mapped to this DCS engine, not
+                        # just the +1 address - engines can be re-discovered at
+                        # a new address (see _reconcile_mth_identities)
+                        self.protowhistle_capable[lionel_engine] = has_protowhistle
+                        for l_key, a_val in self.discovered_mth_engines.items():
+                            if a_val == dcs_engine:
+                                self.protowhistle_capable[int(l_key)] = has_protowhistle
+
                     logger.info(f"🚂 Engine {dcs_engine} ({engine_name}): type=0x{engine_type:02X}, steam={is_steam}, diesel={is_diesel}, ProtoWhistle={has_protowhistle}")
+                    return engine_name
             
             self.mth_socket.settimeout(5.0)
             
@@ -4047,7 +4054,63 @@ class LionelMTHBridge:
             self._mark_wtiu_connection_lost(f"capability query for engine {dcs_engine}: {e}")
         except Exception as e:
             logger.debug(f"⚠️ Failed to query capabilities for engine {dcs_engine}: {e}")
-    
+
+    def _reconcile_mth_identities(self, scanned_engines, prev_names, fresh_names):
+        """Re-point discovered mappings to follow engine identity by name.
+
+        prev_names: {str(dcs_addr): name} recorded before this scan's queries
+        fresh_names: {dcs_addr: name} reported by engines this scan
+
+        - If an address now reports a different engine name, discovered
+          mappings to it are stale - remove them so commands can't land on a
+          different locomotive. The old engine re-maps itself if/when it is
+          discovered at its new address.
+        - If a name last seen at a quiet or reassigned address shows up at a
+          new address, the mappings that followed it move to the new address
+          (e.g. a factory-reset engine that came back as a new DCS number).
+        Manual mappings (engine_mappings) are never touched, and engines that
+        simply don't appear in I0 keep their mappings - absence from a
+        roll-call is not proof of reassignment.
+        """
+        with self.engine_data_lock:
+            for mth_engine in scanned_engines:
+                name = fresh_names.get(mth_engine)
+                if not name or name == "Unknown":
+                    continue
+                prev_name = prev_names.get(str(mth_engine), "")
+
+                if prev_name and prev_name != name:
+                    # A different locomotive occupies this address now
+                    for l_key, a_val in list(self.discovered_mth_engines.items()):
+                        if a_val == mth_engine and l_key not in self.engine_mappings:
+                            del self.discovered_mth_engines[l_key]
+                            logger.info(f"🔗 MTH #{mth_engine} is now '{name}' (was '{prev_name}') - removed Lionel #{l_key} mapping")
+
+                # Addresses where this engine (by name) was previously seen.
+                # An old address that still reports this same name means two
+                # locomotives share it - ambiguous, don't move anything.
+                moved_from = [int(a) for a, n in prev_names.items()
+                              if a.isdigit() and n == name
+                              and int(a) != mth_engine
+                              and fresh_names.get(int(a)) != name]
+                if not moved_from:
+                    continue
+
+                incumbents = [l for l, a in self.discovered_mth_engines.items()
+                              if a == mth_engine and l not in self.engine_mappings]
+                if incumbents and prev_name == name:
+                    # Address already owned by a mapping that followed this
+                    # same engine name - leave things as they are
+                    continue
+                for l_key in incumbents:
+                    # Blind +1 auto-map at an address with no prior name record
+                    del self.discovered_mth_engines[l_key]
+                    logger.info(f"🔗 Removed Lionel #{l_key} → MTH #{mth_engine} (superseded by '{name}')")
+                for l_key, a_val in list(self.discovered_mth_engines.items()):
+                    if a_val in moved_from and l_key not in self.engine_mappings:
+                        self.discovered_mth_engines[l_key] = mth_engine
+                        logger.info(f"🔗 '{name}' moved MTH #{a_val} → #{mth_engine} - Lionel #{l_key} follows")
+
     ENGINE_MAPPINGS_FILE = os.path.join(os.path.expanduser("~/.lionel-mth-bridge"), "engine_mappings.json")
     
     def _load_engine_mappings(self):
@@ -7077,7 +7140,7 @@ def test_connection_manually():
     else:
         logger.error("❌ Failed to connect to MTH WTIU")
 
-BRIDGE_VERSION = "v1.7.4"
+BRIDGE_VERSION = "v1.7.5"
 
 def main():
     print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")
