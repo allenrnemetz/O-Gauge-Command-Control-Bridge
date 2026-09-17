@@ -3418,23 +3418,24 @@ class LionelMTHBridge:
                         return self.send_lashup_command(mth_lashup_id, "ab10", engine)
                     return True
 
-                # Single engine smoke control
+                # Single engine smoke control - send to the engine addressed
+                # in the packet, not whatever was last selected
                 if value == 'off':
                     self.smoke_states[engine] = 0
                     logger.info(f"💨 Smoke OFF (direct) for engine {engine}")
-                    return self.send_wtiu_command('abE')
+                    return self.send_wtiu_command('abE', engine)
                 elif value == 'low':
                     self.smoke_states[engine] = 1
                     logger.info(f"💨 Smoke LOW (direct) for engine {engine}")
-                    return self.send_wtiu_command('ab12')
+                    return self.send_wtiu_command('ab12', engine)
                 elif value == 'med':
                     self.smoke_states[engine] = 2
                     logger.info(f"💨 Smoke MED (direct) for engine {engine}")
-                    return self.send_wtiu_command('ab11')
+                    return self.send_wtiu_command('ab11', engine)
                 elif value == 'high':
                     self.smoke_states[engine] = 3
                     logger.info(f"💨 Smoke HIGH (direct) for engine {engine}")
-                    return self.send_wtiu_command('ab10')
+                    return self.send_wtiu_command('ab10', engine)
                 return True
 
             # Legacy lighting_direct commands from multi-word 0xFB packets
@@ -3458,9 +3459,9 @@ class LionelMTHBridge:
                 logger.info(f"💡 Engine {engine} lighting -> {value}")
                 if isinstance(value, list):
                     for cmd in value:
-                        self.send_wtiu_command(cmd)
+                        self.send_wtiu_command(cmd, engine)
                     return True
-                return self.send_wtiu_command(value)
+                return self.send_wtiu_command(value, engine)
 
             # Legacy smoke commands - track state for cycling behavior
             # Legacy cycles: Smoke ON button = off->low->med->high, Smoke OFF button = high->med->low->off
@@ -3477,13 +3478,13 @@ class LionelMTHBridge:
 
                     if new_state == 1:
                         logger.info(f"💨 Smoke LOW for engine {engine}")
-                        return self.send_wtiu_command('ab12')  # Min
+                        return self.send_wtiu_command('ab12', engine)  # Min
                     elif new_state == 2:
                         logger.info(f"💨 Smoke MED for engine {engine}")
-                        return self.send_wtiu_command('ab11')  # Med
+                        return self.send_wtiu_command('ab11', engine)  # Med
                     elif new_state == 3:
                         logger.info(f"💨 Smoke HIGH for engine {engine}")
-                        return self.send_wtiu_command('ab10')  # Max
+                        return self.send_wtiu_command('ab10', engine)  # Max
                     return True
 
                 elif value == 'off' or value == 'down':
@@ -3493,14 +3494,19 @@ class LionelMTHBridge:
 
                     if new_state == 2:
                         logger.info(f"💨 Smoke MED for engine {engine}")
-                        return self.send_wtiu_command('ab11')  # Med
+                        return self.send_wtiu_command('ab11', engine)  # Med
                     elif new_state == 1:
                         logger.info(f"💨 Smoke LOW for engine {engine}")
-                        return self.send_wtiu_command('ab12')  # Min
+                        return self.send_wtiu_command('ab12', engine)  # Min
                     elif new_state == 0:
                         logger.info(f"💨 Smoke OFF for engine {engine}")
-                        return self.send_wtiu_command('abE')  # Off
+                        return self.send_wtiu_command('abE', engine)  # Off
                     return True
+                return True
+
+            # Multi-word setup word (parameter index) - the actual data arrives
+            # in the 0xFB continuation words. Nothing to send for the leader.
+            elif command.get('type') == 'multiword_index':
                 return True
             
             # Legacy aux1 commands - option1 = startup, option2 = shutdown
@@ -5801,8 +5807,9 @@ class LionelMTHBridge:
                     return False
 
         except Exception as e:
+            # Local error (e.g. unhandled command dict) - not a socket failure.
+            # Real connection loss is detected inside send_wtiu_command.
             logger.error(f"MTH send error: {e}")
-            self.mth_connected = False
             return False
     
     def convert_to_mth_protocol(self, command):
@@ -5853,7 +5860,7 @@ class LionelMTHBridge:
         }
         
         cmd_type = command['type']
-        cmd_value = command['value']
+        cmd_value = command.get('value')
         
         if cmd_type in cmd_map:
             if cmd_type == 'speed':
@@ -6229,14 +6236,27 @@ class LionelMTHBridge:
                                 
                                 # Check if this is a multi-word command (9 bytes total)
                                 # Multi-word: F8/F9 + 2 bytes, then FB + 2 bytes, then FB + 2 bytes
-                                # We detect by checking if byte[2] indicates a multi-word parameter index
+                                # The words often arrive in separate serial reads - if the 4th
+                                # byte is FB we must wait for the rest instead of consuming the
+                                # leader as a standalone command (orphaned FB words are not
+                                # valid packets and get discarded by resync, losing the command).
                                 first_byte = self._tmcc_buffer[0]
                                 is_multiword = False
-                                
-                                if first_byte in [0xF8, 0xF9] and len(self._tmcc_buffer) >= 9:
-                                    # Check if bytes 3 and 6 are 0xFB (continuation markers)
-                                    if self._tmcc_buffer[3] == 0xFB and self._tmcc_buffer[6] == 0xFB:
-                                        is_multiword = True
+
+                                if first_byte in [0xF8, 0xF9]:
+                                    if len(self._tmcc_buffer) >= 4 and self._tmcc_buffer[3] == 0xFB:
+                                        if len(self._tmcc_buffer) < 9:
+                                            break  # continuation words still in flight
+                                        if self._tmcc_buffer[6] == 0xFB:
+                                            is_multiword = True
+                                        # else malformed - consume leader, resync drops the rest
+                                    elif len(self._tmcc_buffer) == 3:
+                                        # Only the leader word is buffered. Parameter-index
+                                        # commands are always multi-word leaders - wait for
+                                        # the continuation words before consuming it.
+                                        cmd_field = ((self._tmcc_buffer[1] << 8) | self._tmcc_buffer[2]) & 0x1FF
+                                        if cmd_field in (0x17C, 0x17D):
+                                            break  # wait for continuation words
                                 
                                 if is_multiword:
                                     # Extract 9-byte multi-word packet
@@ -6341,12 +6361,16 @@ class LionelMTHBridge:
         word1 = (packet[1] << 8) | packet[2]
         if first_byte == 0xF8:  # Engine command
             address = (word1 >> 9) & 0x7F
-            param_index = word1 & 0xFF
+            param_index = word1 & 0x1FF
         elif first_byte == 0xF9:  # Train command
             address = (word1 >> 9) & 0x7F
             param_index = word1 & 0x1FF
         else:
             return None
+
+        # The index lives in the low nibble of the parameter-index command:
+        # cmd 0x17C = index 0x0C (Effects/Smoke), 0x17D = index 0x0D (Lighting)
+        param_index &= 0x0F
         
         # Extract parameter data from word 2
         word2 = (packet[4] << 8) | packet[5]
@@ -7140,7 +7164,7 @@ def test_connection_manually():
     else:
         logger.error("❌ Failed to connect to MTH WTIU")
 
-BRIDGE_VERSION = "v1.7.5"
+BRIDGE_VERSION = "v1.7.6"
 
 def main():
     print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")
