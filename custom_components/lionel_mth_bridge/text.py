@@ -20,7 +20,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import LionelMthBridgeCoordinator
-from .const import DOMAIN, SW_VERSION
+from .const import DOMAIN, ICON_URL_PATH, SW_VERSION
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -116,6 +116,7 @@ class EngineNameText(CoordinatorEntity, TextEntity):
         self._attr_name = f"{label} Engine #{engine_id} Name"
         self._attr_device_info = device_info
         self._attr_icon = "mdi:pencil"
+        self._attr_entity_picture = ICON_URL_PATH
         self._attr_mode = TextMode.TEXT
         self._attr_max_length = 50
 

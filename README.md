@@ -422,6 +422,39 @@ The bridge runs a lightweight HTTP endpoint (port 8580) that serves JSON status 
 
 The endpoint is read-only. Home Assistant cannot send commands to your trains. The only action HA can take is triggering an engine library rescan via the Refresh button.
 
+### Using the Bridge Icon
+
+The integration ships the bridge logo everywhere Home Assistant supports it:
+
+- **Integration tile** (Settings → Devices & Services): shown automatically on **HA 2026.3+** — the icon is served from the integration's own `brand/` folder. On older HA versions this spot can't show custom-integration icons; update HA to get it.
+- **Entity pictures**: every bridge entity (sensors, engines, refresh button) carries the icon, so it appears in entity rows, more-info dialogs, and badge cards automatically.
+- **Served URL**: the integration exposes the icon at `/lionel_mth_bridge/icon.png` — usable anywhere HA accepts an image URL.
+
+#### Dashboard card
+
+Add a picture card to any dashboard (edit dashboard → Add Card → Manual):
+
+```yaml
+type: picture
+image: /lionel_mth_bridge/icon.png
+```
+
+Or to show it next to a specific engine's status:
+
+```yaml
+type: picture-entity
+entity: sensor.lionel_engine_85
+image: /lionel_mth_bridge/icon.png
+show_state: true
+```
+
+#### Phone home screen
+
+The Home Assistant app icon itself can't be changed, but you can make a shortcut with the bridge icon that opens your dashboard:
+
+- **iPhone/iPad**: Shortcuts app → new shortcut → Add Action → "Open URL" → `http://<your-ha>:8123/lovelace/0` → share sheet → "Add to Home Screen" → tap the icon → Choose Photo → use the bridge icon.
+- **Android**: open HA in a browser → ⋮ → "Add to Home screen", or use the HA companion app's widget.
+
 ---
 
 ## Service Commands

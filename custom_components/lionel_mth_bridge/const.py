@@ -16,6 +16,10 @@ STATUS_ENDPOINT = "/status"
 REFRESH_ENDPOINT = "/refresh"
 RENAME_ENDPOINT = "/rename"
 
+# Public URL where the integration serves its brand icon
+# (registered as a static path in __init__.py)
+ICON_URL_PATH = "/lionel_mth_bridge/icon.png"
+
 
 def _load_version() -> str:
     """Read the integration version from manifest.json."""

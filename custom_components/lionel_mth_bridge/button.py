@@ -18,7 +18,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import LionelMthBridgeCoordinator
-from .const import DOMAIN, SW_VERSION
+from .const import DOMAIN, ICON_URL_PATH, SW_VERSION
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,6 +59,7 @@ class RefreshEnginesButton(CoordinatorEntity, ButtonEntity):
         self._attr_name = "Refresh Engines"
         self._attr_device_info = device_info
         self._attr_icon = "mdi:refresh"
+        self._attr_entity_picture = ICON_URL_PATH
 
     async def async_press(self) -> None:
         """Handle the button press — send POST /refresh to the bridge."""

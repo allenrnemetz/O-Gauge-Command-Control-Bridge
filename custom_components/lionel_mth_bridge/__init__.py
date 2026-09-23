@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -24,12 +25,32 @@ from homeassistant.helpers.update_coordinator import (
 from .const import (
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
+    ICON_URL_PATH,
     REFRESH_ENDPOINT,
     RENAME_ENDPOINT,
     STATUS_ENDPOINT,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def _async_register_icon(hass: HomeAssistant) -> None:
+    """Serve the bridge icon at a stable unauthenticated URL.
+
+    Exposes brand/icon.png as /lionel_mth_bridge/icon.png so it can be used
+    for entity pictures, dashboard cards, and phone home-screen shortcuts.
+    """
+    icon_file = Path(__file__).parent / "brand" / "icon.png"
+    try:
+        from homeassistant.components.http import StaticPathConfig
+
+        await hass.http.async_register_static_paths(
+            [StaticPathConfig(ICON_URL_PATH, str(icon_file), True)]
+        )
+    except (ImportError, AttributeError):
+        # HA < 2024.7 fallback
+        hass.http.register_static_path(ICON_URL_PATH, str(icon_file), True)
+    _LOGGER.debug("Serving bridge icon at %s", ICON_URL_PATH)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -39,6 +60,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     coordinator = LionelMthBridgeCoordinator(hass, host, port)
     await coordinator.async_config_entry_first_refresh()
+
+    await _async_register_icon(hass)
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 

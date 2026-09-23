@@ -19,7 +19,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import LionelMthBridgeCoordinator
-from .const import DOMAIN, SW_VERSION
+from .const import DOMAIN, ICON_URL_PATH, SW_VERSION
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -199,6 +199,7 @@ class BridgeBinarySensorBase(CoordinatorEntity, BinarySensorEntity):
         self._attr_unique_id = f"{coordinator.host}:{coordinator.port}_{key}"
         self._attr_name = name
         self._attr_device_info = device_info
+        self._attr_entity_picture = ICON_URL_PATH
         self._key = key
 
     @property
@@ -265,6 +266,7 @@ class BridgeSensorBase(CoordinatorEntity, SensorEntity):
         self._attr_unique_id = f"{coordinator.host}:{coordinator.port}_{key}"
         self._attr_name = name
         self._attr_device_info = device_info
+        self._attr_entity_picture = ICON_URL_PATH
         self._key = key
 
     @property
@@ -336,6 +338,7 @@ class LionelEngineSensor(CoordinatorEntity, SensorEntity):
         self._attr_name = f"Lionel Engine #{tmcc_id}"
         self._attr_device_info = device_info
         self._attr_icon = "mdi:train"
+        self._attr_entity_picture = ICON_URL_PATH
 
     def _find_engine(self) -> dict[str, Any] | None:
         data = self.coordinator.data
@@ -406,6 +409,7 @@ class MthEngineSensor(CoordinatorEntity, SensorEntity):
             self._attr_name = f"MTH Engine #{dcs_id}"
         self._attr_device_info = device_info
         self._attr_icon = "mdi:train"
+        self._attr_entity_picture = ICON_URL_PATH
 
     def _find_engine(self) -> dict[str, Any] | None:
         data = self.coordinator.data
