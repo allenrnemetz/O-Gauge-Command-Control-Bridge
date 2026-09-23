@@ -522,60 +522,22 @@ class LegacyProtocolParser:
             
             # Assign to Train (triggers PDI query for lashup contents)
             0x30: {'type': 'consist', 'value': 'assign_to_train'},  # 100110000 Assign to Train
-            
-            # Diesel Run Level (0x68-0x6F = levels 0-7)
-            0x68: {'type': 'diesel_level', 'value': 0},           # 110100000 Diesel Run Level 0
-            0x69: {'type': 'diesel_level', 'value': 1},           # 110100001 Diesel Run Level 1
-            0x6A: {'type': 'diesel_level', 'value': 2},           # 110100010 Diesel Run Level 2
-            0x6B: {'type': 'diesel_level', 'value': 3},           # 110100011 Diesel Run Level 3
-            0x6C: {'type': 'diesel_level', 'value': 4},           # 110100100 Diesel Run Level 4
-            0x6D: {'type': 'diesel_level', 'value': 5},           # 110100101 Diesel Run Level 5
-            0x6E: {'type': 'diesel_level', 'value': 6},           # 110100110 Diesel Run Level 6
-            0x6F: {'type': 'diesel_level', 'value': 7},           # 110100111 Diesel Run Level 7
-            
-            # RailSounds Triggers
-            0x50: {'type': 'rs_trigger', 'value': 'water_injector'},  # 110101000 Water Injector
-            0x51: {'type': 'rs_trigger', 'value': 'aux_air_horn'},    # 110101001 Aux Air Horn
-            0x53: {'type': 'system', 'value': 'halt'},                # 110101011 System HALT
-            
-            # Bell Slider Position (0x54-0x57)
-            0x54: {'type': 'bell_slider', 'value': 0},            # Bell Slider Position 0
-            0x55: {'type': 'bell_slider', 'value': 1},            # Bell Slider Position 1
-            0x56: {'type': 'bell_slider', 'value': 2},            # Bell Slider Position 2
-            0x57: {'type': 'bell_slider', 'value': 3},            # Bell Slider Position 3
-            
-            # Engine Labor (0x70-0x7F)
-            0x70: {'type': 'labor', 'value': 0},                  # Engine Labor 0
-            0x71: {'type': 'labor', 'value': 1},                  # Engine Labor 1
-            0x72: {'type': 'labor', 'value': 2},                  # Engine Labor 2
-            0x73: {'type': 'labor', 'value': 3},                  # Engine Labor 3
-            0x74: {'type': 'labor', 'value': 4},                  # Engine Labor 4
-            0x75: {'type': 'labor', 'value': 5},                  # Engine Labor 5
-            0x76: {'type': 'labor', 'value': 6},                  # Engine Labor 6
-            0x77: {'type': 'labor', 'value': 7},                  # Engine Labor 7
-            
-            # Quilling Horn (0x78-0x7F)
-            0x78: {'type': 'quilling_horn', 'value': 0},          # Quilling Horn Intensity 0
-            0x79: {'type': 'quilling_horn', 'value': 1},          # Quilling Horn Intensity 1
-            0x7A: {'type': 'quilling_horn', 'value': 2},          # Quilling Horn Intensity 2
-            0x7B: {'type': 'quilling_horn', 'value': 3},          # Quilling Horn Intensity 3
-            0x7C: {'type': 'quilling_horn', 'value': 4},          # Quilling Horn Intensity 4
-            0x7D: {'type': 'quilling_horn', 'value': 5},          # Quilling Horn Intensity 5
-            0x7E: {'type': 'quilling_horn', 'value': 6},          # Quilling Horn Intensity 6
-            0x7F: {'type': 'quilling_horn', 'value': 7},          # Quilling Horn Intensity 7
-            
-            # Startup/Shutdown per LCS Legacy Protocol Spec:
-            # 0xFB (1FB) = Start Up Sequence 1 (Delayed Prime Mover) = Extended
-            # 0xFC (1FC) = Start Up Sequence 2 (Immediate Start Up) = Quick
-            # 0xFD (1FD) = Shut Down Sequence 1 (Delay w/ Announcement) = Extended
-            # 0xFE (1FE) = Shut Down Sequence 2 (Immediate Shut Down) = Quick
-            0xFB: {'type': 'engine', 'value': 'startup_extended'},  # Delayed Prime Mover
-            0xFC: {'type': 'engine', 'value': 'startup'},           # Immediate Start Up
-            0xFD: {'type': 'engine', 'value': 'shutdown_extended'}, # Delay w/ Announcement
-            0xFE: {'type': 'engine', 'value': 'shutdown'},          # Immediate Shut Down
-            0xFF: {'type': 'engine', 'value': 'stop_immediate'},    # Stop Immediate
-            
-            # CAB3 Quilling Horn (0xE0-0xEF = intensity 0-15)
+
+            # Sound system + steam sound triggers (0x150-0x153, PyTrain-documented
+            # commands predating the v1.22 spec table)
+            0x50: {'type': 'sound_system', 'value': 'off'},         # 101010000 Sound Off
+            0x51: {'type': 'sound_system', 'value': 'on'},          # 101010001 Sound On
+            0x52: {'type': 'rs_trigger', 'value': 'cylinder_hiss'}, # 101010010 Cylinder Hiss
+            0x53: {'type': 'rs_trigger', 'value': 'pop_off'},       # 101010011 Pop-Off (NOT halt - see 0xAB)
+
+            # RailSounds Triggers + HALT (0x1A8-0x1AB)
+            0xA8: {'type': 'rs_trigger', 'value': 'water_injector'},  # 110101000 Water Injector
+            0xA9: {'type': 'rs_trigger', 'value': 'aux_air_horn'},    # 110101001 Aux Air Horn
+            # 0x1AB System HALT - decoded but deliberately never forwarded to the
+            # WTIU (MTH o0 e-stop latches until the WTIU is power-cycled)
+            0xAB: {'type': 'system', 'value': 'halt'},                # 110101011 System HALT
+
+            # Quilling Horn (0xE0-0xEF = intensity 0-15)
             0xE0: {'type': 'quilling_horn', 'value': 0},
             0xE1: {'type': 'quilling_horn', 'value': 1},
             0xE2: {'type': 'quilling_horn', 'value': 2},
@@ -592,9 +554,48 @@ class LegacyProtocolParser:
             0xED: {'type': 'quilling_horn', 'value': 13},
             0xEE: {'type': 'quilling_horn', 'value': 14},
             0xEF: {'type': 'quilling_horn', 'value': 15},
+
+            # Bell + sound triggers (0x1F4-0x1FA)
+            0xF4: {'type': 'bell', 'value': 'off'},                 # 111110100 Bell Off
+            0xF5: {'type': 'bell', 'value': 'on'},                  # 111110101 Bell On
+            0xF6: {'type': 'rs_trigger', 'value': 'brake_squeal'},  # 111110110 Brake Squeal
+            0xF7: {'type': 'rs_trigger', 'value': 'auger'},         # 111110111 Auger
+            0xF8: {'type': 'rs_trigger', 'value': 'brake_air_release'},  # 111111000 Brake Air Release
+            0xF9: {'type': 'rs_trigger', 'value': 'let_off_short'}, # 111111001 Short Let-Off
+            0xFA: {'type': 'rs_trigger', 'value': 'let_off_long'},  # 111111010 Long Let-Off
+
+            # Startup/Shutdown per LCS Legacy Protocol Spec:
+            # 0xFB (1FB) = Start Up Sequence 1 (Delayed Prime Mover) = Extended
+            # 0xFC (1FC) = Start Up Sequence 2 (Immediate Start Up) = Quick
+            # 0xFD (1FD) = Shut Down Sequence 1 (Delay w/ Announcement) = Extended
+            # 0xFE (1FE) = Shut Down Sequence 2 (Immediate Shut Down) = Quick
+            0xFB: {'type': 'engine', 'value': 'startup_extended'},  # Delayed Prime Mover
+            0xFC: {'type': 'engine', 'value': 'startup'},           # Immediate Start Up
+            0xFD: {'type': 'engine', 'value': 'shutdown_extended'}, # Delay w/ Announcement
+            0xFE: {'type': 'engine', 'value': 'shutdown'},          # Immediate Shut Down
+            0xFF: {'type': 'engine', 'value': 'stop_immediate'},    # Stop Immediate
         }
-        
-        # Handle relative speed commands (0x40-0x4A)
+
+        # Parameter-index leaders (start of a 9-byte multi-word sequence).
+        # PyTrain multibyte_constants: 0x6F=variable, 0x71=param assign,
+        # 0x72=dialog triggers, 0x74=effects triggers, 0x76=masking,
+        # 0x7C=effects controls (smoke), 0x7D=lighting, 0x7E=target speed.
+        # Checked BEFORE the 32-step range below - these indices overlap it.
+        if cmd_byte in (0x6F, 0x71, 0x72, 0x74, 0x76, 0x7C, 0x7D, 0x7E):
+            logger.info(f"🔧 Parameter Index detected: 0x{cmd_byte:02x} - ignoring as multi-word setup")
+            return {'type': 'multiword_index', 'index': cmd_byte, 'engine': address, 'protocol': 'legacy'}
+
+        # Handle train assignment (0x30-0x3F = assign to train 0-15)
+        if 0x30 <= cmd_byte <= 0x3F:
+            train_addr = cmd_byte & 0x0F
+            return {
+                'type': 'train_assign',
+                'value': train_addr,
+                'engine': address,
+                'protocol': 'legacy'
+            }
+
+        # Handle relative speed commands (0x40-0x4A = 10100DDDD, offset by 5)
         if 0x40 <= cmd_byte <= 0x4A:
             speed_change = cmd_byte - 0x45  # 0x45 = no change, below = decrease, above = increase
             return {
@@ -604,12 +605,12 @@ class LegacyProtocolParser:
                 'engine': address,
                 'protocol': 'legacy'
             }
-        
-        # Handle absolute speed 32-step (0xB0-0xCF = binary 1011DDDDD, speed 0-31)
-        # Per LCS spec: "Set Absolute Speed 32 (D = 0...31)" = 1011DDDDD
-        # Range is 0xB0 (D=0) to 0xCF (D=31) - NOT 0xDF!
-        if 0xB0 <= cmd_byte <= 0xCF:
-            speed = cmd_byte - 0xB0
+
+        # Handle absolute speed 32-step (0x60-0x7F = binary 1011DDDDD, speed 0-31)
+        # Per LCS spec: "Set Absolute Speed 32 (D = 0...31)" = 1011DDDDD ->
+        # commands 0x160-0x17F, so the low byte is 0x60-0x7F.
+        if 0x60 <= cmd_byte <= 0x7F:
+            speed = cmd_byte & 0x1F
             # TMCC1-style TRs (IDs 1-9 by convention) are 32-step only and never
             # follow up with a 200-step command, so discarding this here would
             # leave their absolute speed dial permanently non-functional. Only
@@ -632,31 +633,33 @@ class LegacyProtocolParser:
             # Don't send 32-step speed - Legacy should use 200-step
             # Just log it and return None to ignore
             return None
-        
-        # Handle train assignment (0x30-0x3F = assign to train 0-15)
-        if 0x30 <= cmd_byte <= 0x3F:
-            train_addr = cmd_byte & 0x0F
-            return {
-                'type': 'train_assign',
-                'value': train_addr,
-                'engine': address,
-                'protocol': 'legacy'
-            }
-        
-        # Check for Parameter Index pattern (0x7C, 0x7D for multi-word commands)
-        # These are NOT quilling horn - they're the start of multi-word command sequences
-        # 0x7C = index 0x0C (Effects/Smoke), 0x7D = index 0x0D (Lighting)
-        if cmd_byte in [0x7C, 0x7D]:
-            index = cmd_byte & 0x0F
-            logger.info(f"🔧 Parameter Index detected: 0x{cmd_byte:02x} (index=0x{index:02x}) - ignoring as multi-word setup")
-            return {'type': 'multiword_index', 'index': index, 'engine': address, 'protocol': 'legacy'}
-        
+
+        # Diesel Run Level (0x1A0-0x1A7 = 110100DDD, level 0-7)
+        if 0xA0 <= cmd_byte <= 0xA7:
+            return {'type': 'diesel_level', 'value': cmd_byte & 0x07,
+                    'engine': address, 'protocol': 'legacy'}
+
+        # Bell Slider Position (0x1B0-0x1B7 = 110110DDD, positions 2-5 per spec)
+        if 0xB0 <= cmd_byte <= 0xB7:
+            return {'type': 'bell_slider', 'value': cmd_byte & 0x07,
+                    'engine': address, 'protocol': 'legacy'}
+
+        # Engine Labor (0x1C0-0x1DF = 1110DDDDD, labor 0-31)
+        if 0xC0 <= cmd_byte <= 0xDF:
+            return {'type': 'labor', 'value': cmd_byte & 0x1F,
+                    'engine': address, 'protocol': 'legacy'}
+
+        # Bell One-Shot Ding (0x1F0-0x1F3 = 1111100DD, ding 0-3)
+        if 0xF0 <= cmd_byte <= 0xF3:
+            return {'type': 'bell_ding', 'value': cmd_byte & 0x03,
+                    'engine': address, 'protocol': 'legacy'}
+
         if cmd_byte in action_map:
             cmd = action_map[cmd_byte].copy()
             cmd['engine'] = address
             cmd['protocol'] = 'legacy'
             return cmd
-            
+
         return None
     
     def parse_multiword_command(self, packet):
@@ -3208,10 +3211,11 @@ class LionelMTHBridge:
                 level = min(8, max(1, command.get('value', 0) + 1))
                 return self.send_wtiu_command(f'g{level}')
             
-            # Legacy labor/rev commands (r14-r17)
+            # Legacy labor/rev commands (r15 normal, r16 labor, r17 drift)
+            # Labor level is 0-31 (1110DDDDD) - lower = drifting, higher = laboring
             elif command.get('type') == 'labor':
                 level = command.get('value', 0)
-                mth_cmd = 'r17' if level <= 2 else ('r15' if level <= 4 else 'r16')
+                mth_cmd = 'r17' if level <= 10 else ('r15' if level <= 21 else 'r16')
                 return self.send_wtiu_command(mth_cmd)
             
             # Legacy quilling horn -> MTH ProtoWhistle with pitch mapping
@@ -3687,6 +3691,122 @@ class LionelMTHBridge:
                 logger.info(f"🎚️ Absolute speed {speed} -> MTH {dcs_speed}")
                 return self.send_wtiu_command(f's{dcs_speed}')
             
+            # Legacy bell slider -> MTH bell volume channel (v4)
+            # Spec: positions 2-5 -> 40-100% volume
+            elif command.get('type') == 'bell_slider':
+                pos = command.get('value', 0)
+                vol = min(100, pos * 20)
+                logger.info(f"🔔 Bell slider pos {pos} -> v4{vol} for engine {engine}")
+                return self.send_wtiu_command(f'v4{vol}')
+
+            # Sound system on/off -> MTH engine-sound volume channel (v1)
+            elif command.get('type') == 'sound_system':
+                if not hasattr(self, '_engine_sound_vol'):
+                    self._engine_sound_vol = {}
+                if command.get('value') == 'off':
+                    logger.info(f"🔇 Sound system OFF for engine {engine} -> v10")
+                    return self.send_wtiu_command('v10')
+                vol = self._engine_sound_vol.get(engine, 100)
+                logger.info(f"🔊 Sound system ON for engine {engine} -> v1{vol}")
+                return self.send_wtiu_command(f'v1{vol}')
+
+            # Legacy brake/boost/train-brake slider levels -> proportional speed
+            # step. No direct MTH equivalent: brake level N scales current speed
+            # by (7-N)/7 (level 7 = full stop), boost level N adds a fraction of
+            # the remaining headroom (level 7 = max).
+            elif command.get('type') in ('brake_level', 'boost_level', 'train_brake'):
+                level = command.get('value', 0)
+                cur = self.legacy_speed_manager.get_current_speed(engine)['legacy']
+                if command['type'] == 'boost_level':
+                    new_speed = min(199, cur + (199 - cur) * level // 7)
+                else:
+                    new_speed = cur * (7 - level) // 7
+                if new_speed == cur:
+                    return True
+                dcs_speed = self.legacy_speed_manager.set_legacy_speed(engine, new_speed)
+                if dcs_speed is None:
+                    return True
+                logger.info(f"🎯 {command['type']} level {level}: engine {engine} speed {cur} -> {new_speed}/199 (s{dcs_speed})")
+                mth_lashup_id = self.lashup_manager.get_mth_id_for_tr(engine)
+                if mth_lashup_id:
+                    return self.send_lashup_command(mth_lashup_id, f's{dcs_speed}', engine)
+                return self.send_wtiu_command(f's{dcs_speed}')
+
+            # Assign-to-train (0x130-0x13F): informational leader - the multi-word
+            # TRAIN_ADDRESS (0x42) packet carries the real consist data. Record the
+            # assignment and swallow so ~500 CAB3 repeats stop spamming Unknown.
+            elif command.get('type') == 'train_assign':
+                train_id = command.get('value', 0)
+                if not hasattr(self, '_train_assignments'):
+                    self._train_assignments = {}
+                if self._train_assignments.get(engine) != train_id:
+                    self._train_assignments[engine] = train_id
+                    logger.info(f"🔗 Engine {engine} assigned to TR{train_id}")
+                return True
+
+            # Clean swallows - decoded commands with no safe MTH equivalent
+            elif command.get('type') == 'bell_ding':
+                logger.debug(f"🔔 Bell ding {command.get('value')} for engine {engine} (no MTH equivalent)")
+                return True
+
+            elif command.get('type') == 'stall':
+                logger.debug(f"🔧 Stall set for engine {engine} (no MTH equivalent)")
+                return True
+
+            elif command.get('type') == 'address':
+                return True
+
+            # Legacy dialog triggers (multi-word index 0x72) -> MTH PFA sequence.
+            # Same state machine as Numeric 7: u1 starts, m24 advances, u0 ends
+            # after 60s of inactivity.
+            elif command.get('type') == 'dialog':
+                current_time = time.time()
+                last_pfa_time = self.pfa_direction.get(engine, 0)
+                pfa_active = self.pfa_state.get(engine, False)
+
+                if pfa_active and (current_time - last_pfa_time > 60):
+                    logger.info(f"💬 PFA Timeout: Engine {engine} -> u0")
+                    self.send_wtiu_command('u0')
+                    self.pfa_state[engine] = False
+                    pfa_active = False
+
+                self.pfa_direction[engine] = current_time
+                if not pfa_active:
+                    self.pfa_state[engine] = True
+                    logger.info(f"💬 Dialog -> PFA start: engine {engine} -> u1")
+                    return self.send_wtiu_command('u1')
+                logger.info(f"💬 Dialog -> PFA advance: engine {engine} -> m24")
+                return self.send_wtiu_command('m24')
+
+            # Legacy effects triggers (multi-word index 0x74)
+            elif command.get('type') == 'effects_trigger':
+                value = command.get('value')
+                current_time = time.time()
+                last_vol_time = self.last_command_time.get('effects_vol', 0)
+                if current_time - last_vol_time < 0.3:  # debounce repeats
+                    return True
+                self.last_command_time['effects_vol'] = current_time
+
+                if value in ('vol_up', 'vol_down'):
+                    step = self.volume_step if value == 'vol_up' else -self.volume_step
+                    self.master_volume = max(0, min(100, self.master_volume + step))
+                    logger.info(f"🔊 Effects {value} -> v0{self.master_volume}")
+                    return self.send_wtiu_command(f'v0{self.master_volume}')
+                elif value in ('blend_up', 'blend_down'):
+                    if not hasattr(self, '_blend_volume'):
+                        self._blend_volume = 50
+                    step = self.volume_step if value == 'blend_up' else -self.volume_step
+                    self._blend_volume = max(0, min(100, self._blend_volume + step))
+                    logger.info(f"🔊 Effects {value} -> v2{self._blend_volume}")
+                    return self.send_wtiu_command(f'v2{self._blend_volume}')
+                elif value in ('coupler_compress', 'coupler_stretch'):
+                    logger.info(f"🔗 Effects {value} -> h1 for engine {engine}")
+                    return self.send_wtiu_command('h1')
+                elif value == 'cyl_clear':
+                    logger.info(f"💨 Effects cylinder clearing -> n30 for engine {engine}")
+                    return self.send_wtiu_command('n30')
+                return True
+
             # Legacy RailSounds triggers
             elif command.get('type') == 'rs_trigger':
                 value = command.get('value')
@@ -3694,11 +3814,17 @@ class LionelMTHBridge:
                     return self.send_wtiu_command('w800')
                 elif value == 'aux_air_horn':
                     return self.send_wtiu_command('n243')
+                elif value in ('cylinder_hiss', 'pop_off', 'brake_squeal', 'auger',
+                               'brake_air_release', 'let_off_short', 'let_off_long'):
+                    # Steam/air sound triggers -> generic steam hiss
+                    return self.send_wtiu_command('n30')
                 return True
-            
-            # Legacy system halt
+
+            # Legacy system halt - NEVER forwarded. MTH o0 e-stop latches the
+            # WTIU until it is physically power-cycled, so HALT is swallowed.
             elif command.get('type') == 'system' and command.get('value') == 'halt':
-                return self.send_wtiu_command('o0')
+                logger.warning(f"🛑 System HALT for engine {engine} - not forwarded to WTIU")
+                return True
                 
         # Fall back to original TMCC1 handling
         return self.send_to_mth(command)
@@ -4719,6 +4845,12 @@ class LionelMTHBridge:
 
     def send_wtiu_command(self, command, engine=None):
         """Send command to WTIU in exact ESP8266 format"""
+        # NEVER send emergency stop: 'o0' latches the WTIU into a fault state
+        # that requires physically power-cycling it. Lionel HALT is swallowed
+        # upstream - this guard is defense-in-depth for every code path.
+        if command and command.strip().lower() == 'o0':
+            logger.warning("🛑 Blocked MTH emergency stop (o0) - requires WTIU power cycle")
+            return False
         try:
             # Global rate limiting to prevent WTIU overload
             current_time = time.time()
@@ -5610,7 +5742,13 @@ class LionelMTHBridge:
         if not self.mth_connected or not self.mth_socket:
             logger.warning("⚠️ Cannot send lashup command: WTIU not connected")
             return False
-        
+
+        # NEVER send emergency stop to a lashup either - 'o0' latches the WTIU
+        # until it is physically power-cycled
+        if mth_cmd and mth_cmd.strip().lower() == 'o0':
+            logger.warning("🛑 Blocked MTH lashup emergency stop (o0)")
+            return False
+
         # DCS lashups require 2+ engines - the WTIU has no concept of a 1-engine
         # lashup and rejects the "|cmd,list" format for one. When a mixed
         # Lionel/MTH consist reduces to a single real MTH engine, send directly
@@ -6247,8 +6385,14 @@ class LionelMTHBridge:
                                         # Only the leader word is buffered. Parameter-index
                                         # commands are always multi-word leaders - wait for
                                         # the continuation words before consuming it.
+                                        # PyTrain indices: 0x6F=variable, 0x71=param assign,
+                                        # 0x72=dialog, 0x74=effects, 0x76=masking,
+                                        # 0x7C=smoke, 0x7D=lighting, 0x7E=target speed.
+                                        # 0x140 (R4LC) is NOT included - it collides with
+                                        # relative-speed -5, a common real command.
                                         cmd_field = ((self._tmcc_buffer[1] << 8) | self._tmcc_buffer[2]) & 0x1FF
-                                        if cmd_field in (0x17C, 0x17D):
+                                        if cmd_field in (0x16F, 0x171, 0x172, 0x174,
+                                                         0x176, 0x17C, 0x17D, 0x17E):
                                             break  # wait for continuation words
                                 
                                 if is_multiword:
@@ -6424,7 +6568,42 @@ class LionelMTHBridge:
             else:
                 logger.debug(f"💡 Multi-word lighting: data=0x{param_data:02x} (no MTH equivalent) for engine {address}")
                 return None
-        
+
+        # Dialog triggers (index 0x72 -> masked 0x02)
+        # CAB3 announcement buttons (conductor/tower/engineer dialogs). On MTH
+        # the closest equivalent is the PFA sequence - dispatch advances it.
+        if param_index == 0x02:
+            dialog_names = {
+                0x30: 'conductor all aboard', 0x68: 'next stop',
+                0x69: 'watch your step', 0x6A: 'all aboard',
+                0x6B: 'tickets please', 0x6C: 'premature stop',
+                0x6D: 'welcome aboard', 0x71: 'station arriving',
+                0x72: 'station arrived', 0x73: 'station boarding',
+                0x74: 'station departing', 0x75: 'car startup',
+                0x76: 'car shutdown',
+            }
+            name = dialog_names.get(param_data, f'dialog 0x{param_data:02x}')
+            logger.info(f"💬 Dialog trigger: {name} for engine {address}")
+            return {'type': 'dialog', 'value': param_data, 'engine': address, 'protocol': 'legacy'}
+
+        # RailSounds effects triggers (index 0x74 -> masked 0x04)
+        if param_index == 0x04:
+            effects_map = {
+                0x12: 'vol_down',       # master volume down
+                0x13: 'vol_up',         # master volume up
+                0x14: 'blend_down',     # blend volume down
+                0x15: 'blend_up',       # blend volume up
+                0x20: 'cyl_clear',      # cylinder clearing on
+                0x26: 'coupler_compress',  # coupler impact compress
+                0x27: 'coupler_stretch',   # coupler impact stretch
+            }
+            effect = effects_map.get(param_data)
+            if effect:
+                logger.info(f"🔊 Effects trigger: {effect} (0x{param_data:02x}) for engine {address}")
+                return {'type': 'effects_trigger', 'value': effect, 'engine': address, 'protocol': 'legacy'}
+            logger.debug(f"🔊 Effects trigger 0x{param_data:02x} (no MTH equivalent) for engine {address}")
+            return None
+
         return None
     
     def process_consist_commands(self, data: bytes):
@@ -7157,7 +7336,7 @@ def test_connection_manually():
     else:
         logger.error("❌ Failed to connect to MTH WTIU")
 
-BRIDGE_VERSION = "v1.7.7"
+BRIDGE_VERSION = "v1.7.8"
 
 def main():
     print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")
