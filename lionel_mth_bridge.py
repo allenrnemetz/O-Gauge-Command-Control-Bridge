@@ -160,6 +160,10 @@ class Config:
             "mth_host": "auto",
             "mth_port": "auto",
             "base3_host": "auto",
+            # WiFi library scans are transient (connect-scan-disconnect); set
+            # false to never touch the Base 3 WiFi port. The Base 3 allows only
+            # one WiFi client per IP - JMRI/STM2 monitoring needs the slot.
+            "base3_wifi_enabled": True,
             "legacy_enabled": True,
             "debug": False,
             "log_level": "INFO",
@@ -2716,22 +2720,10 @@ class LionelMTHBridge:
                     else:
                         logger.warning("⚠️ MTH WTIU reconnect failed, will retry...")
 
-                # Check if Base 3 WiFi connection is still alive
-                if hasattr(self, 'base3_wifi') and self.base3_wifi:
-                    if not self.base3_wifi.connected:
-                        logger.warning("⚠️ Base 3 WiFi connection lost, attempting reconnect...")
-                        base3_host = self.settings.get('base3_host', 'auto')
-                        if base3_host == 'auto':
-                            if self.base3_wifi.connect():
-                                logger.info("✅ Base 3 WiFi reconnected successfully!")
-                            else:
-                                logger.warning("⚠️ Base 3 WiFi reconnect failed, will retry...")
-                        elif base3_host:
-                            if self.base3_wifi.connect(base3_host):
-                                logger.info("✅ Base 3 WiFi reconnected successfully!")
-                            else:
-                                logger.warning("⚠️ Base 3 WiFi reconnect failed, will retry...")
-                
+                # NOTE: Base 3 WiFi is intentionally NOT babysat here - the
+                # connection is transient (connect-scan-disconnect) so JMRI/STM2
+                # can use the Base 3's single WiFi-client-per-IP slot.
+
             except Exception as e:
                 logger.error(f"❌ Connection monitor error: {e}")
                 
@@ -4271,17 +4263,27 @@ class LionelMTHBridge:
         The Base 3 only answers PDI database queries over WiFi (TCP port 50001),
         NOT over SER2 serial. This method connects to the Base 3 WiFi interface
         and queries all 99 engine slots.
+
+        The connection is TRANSIENT: connect, scan, disconnect. The Base 3 only
+        allows one WiFi client per IP address - holding the port would lock out
+        JMRI (which needs it for STM2 switch-throw monitoring) running on the
+        same mini PC. If JMRI already holds the slot, the scan skips gracefully
+        and the last-known roster is kept.
         """
-        # Ensure WiFi connection
+        if not self.settings.get('base3_wifi_enabled', True):
+            logger.debug("📡 Base 3 WiFi disabled (base3_wifi_enabled=false) - skipping library scan")
+            return
+
+        # Transient connection - connect just for the scan
         if not self.base3_wifi.connected:
             base3_host = self.settings.get('base3_host', 'auto')
             if base3_host == 'auto':
                 if not self.base3_wifi.connect():
-                    logger.warning("⚠️ Cannot scan Base 3 library - WiFi not connected")
+                    logger.warning("⚠️ Cannot scan Base 3 library - WiFi unavailable (in use? Base 3 allows one WiFi client per IP)")
                     return
             elif base3_host:
                 if not self.base3_wifi.connect(base3_host):
-                    logger.warning("⚠️ Cannot scan Base 3 library - WiFi not connected")
+                    logger.warning("⚠️ Cannot scan Base 3 library - WiFi unavailable (in use? Base 3 allows one WiFi client per IP)")
                     return
             else:
                 logger.warning("⚠️ Cannot scan Base 3 library - base3_host not configured")
@@ -4291,24 +4293,28 @@ class LionelMTHBridge:
         found = 0
         new_library = {}
 
-        for engine_id in range(1, 100):
-            result = self.base3_wifi.query_engine(engine_id, timeout=2.0)
-            time.sleep(0.05)  # Small delay to avoid overwhelming the Base 3
-            if result:
-                new_library[engine_id] = {
-                    'road_name': result.get('road_name'),
-                    'road_number': result.get('road_number'),
-                    'loco_type': result.get('loco_type'),
-                    'control_type': result.get('control_type'),
-                    'sound_type': result.get('sound_type'),
-                    'last_train_id': result.get('last_train_id'),
-                }
-                found += 1
+        try:
+            for engine_id in range(1, 100):
+                result = self.base3_wifi.query_engine(engine_id, timeout=2.0)
+                time.sleep(0.05)  # Small delay to avoid overwhelming the Base 3
+                if result:
+                    new_library[engine_id] = {
+                        'road_name': result.get('road_name'),
+                        'road_number': result.get('road_number'),
+                        'loco_type': result.get('loco_type'),
+                        'control_type': result.get('control_type'),
+                        'sound_type': result.get('sound_type'),
+                        'last_train_id': result.get('last_train_id'),
+                    }
+                    found += 1
 
-            # Check if connection dropped
-            if not self.base3_wifi.connected:
-                logger.warning(f"⚠️ Base 3 WiFi scan interrupted at slot {engine_id}")
-                break
+                # Check if connection dropped
+                if not self.base3_wifi.connected:
+                    logger.warning(f"⚠️ Base 3 WiFi scan interrupted at slot {engine_id}")
+                    break
+        finally:
+            # Release the WiFi slot immediately - JMRI/STM2 needs it
+            self.base3_wifi.disconnect()
 
         with self.engine_data_lock:
             self.lionel_engine_library = new_library
@@ -6934,19 +6940,13 @@ class LionelMTHBridge:
             except Exception as e:
                 logger.error(f"❌ Could not start HA status endpoint: {e}")
 
-        # Connect to Base 3 via WiFi (port 50001) for PDI database queries.
-        # This is separate from SER2 serial (TMCC command listening).
-        # The Base 3 only answers engine library queries over WiFi, not SER2.
-        # Connection runs in background so it doesn't block startup.
+        # Scan the Base 3 engine library over WiFi (port 50001). The connection
+        # is transient - discover_base3_engines() connects, scans and
+        # disconnects - because the Base 3 allows only one WiFi client per IP
+        # (JMRI/STM2 monitoring on this machine may hold the slot).
+        # Runs in background so it doesn't block startup.
         def _connect_base3_wifi():
-            base3_host = self.settings.get('base3_host', 'auto')
-            if base3_host == 'auto':
-                self.base3_wifi.connect()  # Will scan the network
-            elif base3_host:
-                self.base3_wifi.connect(base3_host)
-            # If connected, scan engine library
-            if self.base3_wifi.connected:
-                self.discover_base3_engines()
+            self.discover_base3_engines()
         threading.Thread(target=_connect_base3_wifi, daemon=True).start()
 
         return True

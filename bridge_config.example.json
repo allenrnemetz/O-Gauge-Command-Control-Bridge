@@ -4,6 +4,7 @@
     "mth_host": "auto",
     "mth_port": "auto",
     "base3_host": "auto",
+    "base3_wifi_enabled": true,
     "debug": false,
     "engine_mappings": {},
     "engine_name_overrides": {},
