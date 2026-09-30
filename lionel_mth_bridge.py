@@ -6964,6 +6964,13 @@ class LionelMTHBridge:
                     if self.mth_connected:
                         logger.info("🔄 Periodic MTH engine re-discovery...")
                         self.discover_mth_engines()
+                    # Retry the Base 3 library scan while it stays empty (e.g.
+                    # the base was offline at bridge startup). The scan is
+                    # transient - connect, scan, disconnect - so it coexists
+                    # with the JMRI STM2 monitor holding the WiFi port.
+                    if not self._refresh_in_progress and not self.lionel_engine_library:
+                        logger.info("🔄 Lionel library empty - retrying Base 3 WiFi scan...")
+                        self.discover_base3_engines()
                 except Exception as e:
                     logger.error(f"❌ Periodic engine discovery error: {e}")
         
@@ -7336,7 +7343,7 @@ def test_connection_manually():
     else:
         logger.error("❌ Failed to connect to MTH WTIU")
 
-BRIDGE_VERSION = "v1.7.9"
+BRIDGE_VERSION = "v1.7.10"
 
 def main():
     print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")
