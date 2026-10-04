@@ -115,6 +115,13 @@ PDI_SOP = 0xD1  # Start of Packet
 PDI_EOP = 0xDF  # End of Packet
 PDI_STF = 0xDE  # Stuff byte (escape)
 
+# AUX1 is a modal prefix key (Cab-1/CAB3): AUX1 followed by Numeric 1/4
+# adjusts background/blend volume instead of master volume. When 0x109
+# arrives we defer the quick-startup u4 for this many seconds - if a
+# volume key follows inside the window it was a blend press, not a
+# startup request.
+AUX1_PREFIX_WINDOW = 0.8
+
 # Base 3 WiFi PDI connection (from PyTrain)
 BASE3_WIFI_PORT = 50001
 BASE3_KEEPALIVE = bytes([PDI_SOP, 0x29, 0xD7, PDI_EOP])  # D129D7DF
@@ -2504,6 +2511,7 @@ class LionelMTHBridge:
         
         mth_settings = self.settings.get('mth_settings', {})
         self.master_volume = mth_settings.get('master_volume', 70)
+        self.blend_volume = mth_settings.get('blend_volume', 70)
         self.volume_step = mth_settings.get('volume_step', 5)
         self.use_encryption = mth_settings.get('use_encryption', True)
         self.simplified_handshake_first = mth_settings.get('simplified_handshake_first', True)
@@ -2570,7 +2578,18 @@ class LionelMTHBridge:
         
         # Volume tracking
         self.master_volume = 70  # Default master volume (0-100)
+        self.blend_volume = 70  # Default blend/background volume (0-100)
         self.volume_step = 5  # Volume increment/decrement step
+
+        # AUX1 modal-prefix tracking: {'eng<N>'|'tr<N>': timestamp}. Set when
+        # 0x109 arrives; a following volume key inside AUX1_PREFIX_WINDOW is a
+        # blend press, otherwise the sweep fires the deferred quick-startup.
+        self._aux1_prefix = {}
+        self._startup_debounce = {}
+        self._lashup_startup_debounce = {}
+        self._lashup_blend_volume = {}  # {train_id: 0-100}
+        self._engine_sound_vol = {}  # {engine: last engine-sound volume for sound-system ON}
+        self._train_assignments = {}  # {engine: last assigned TR id}
         
         # PFA state tracking (per engine)
         # States: 0=off, 1-4=announcement step (direction toggles to advance)
@@ -3503,16 +3522,13 @@ class LionelMTHBridge:
                 elif value == 'off':
                     return self.send_wtiu_command('ab2')
                 elif value == 'option1':
-                    # Debounce startup to prevent repeated u4 from toggling engine on/off
-                    if not hasattr(self, '_startup_debounce'):
-                        self._startup_debounce = {}
-                    last_startup = self._startup_debounce.get(engine, 0)
-                    if time.time() - last_startup < 5.0:  # 5 second debounce
-                        logger.debug(f"🚂 Aux1 Startup ignored (debounced) for engine {engine}")
-                        return True
-                    self._startup_debounce[engine] = time.time()
-                    logger.info(f"🚂 Aux1 Startup for engine {engine}")
-                    return self.send_wtiu_command('u4')  # Startup
+                    # AUX1 is a modal prefix: blend-volume presses send AUX1
+                    # then Numeric 1/4. Defer the startup - if a volume key
+                    # follows within AUX1_PREFIX_WINDOW it was a blend press.
+                    # The lionel_listener loop fires the deferred u4 on expiry.
+                    self._aux1_prefix[f'eng{engine}'] = time.time()
+                    logger.debug(f"🚂 AUX1 prefix for engine {engine} (startup deferred)")
+                    return True
                 elif value == 'option2':
                     # Debounce shutdown similarly
                     if not hasattr(self, '_shutdown_debounce'):
@@ -3566,6 +3582,10 @@ class LionelMTHBridge:
                     last_vol_time = self.last_command_time.get('volume', 0)
                     if current_time - last_vol_time > 0.3:  # 300ms debounce
                         self.last_command_time['volume'] = current_time
+                        if self._aux1_prefix_pending(f'eng{engine}'):
+                            self.blend_volume = min(100, self.blend_volume + self.volume_step)
+                            logger.info(f"🔧 AUX1+Numeric 1 → Blend Volume Up: {self.blend_volume}")
+                            return self.send_wtiu_command(f'v2{self.blend_volume}', engine)
                         self.master_volume = min(100, self.master_volume + self.volume_step)
                         logger.info(f" Legacy Numeric 1 → Volume Up: {self.master_volume}")
                         return self.send_wtiu_command(f'v0{self.master_volume}')  # v0 = master volume
@@ -3576,6 +3596,10 @@ class LionelMTHBridge:
                     last_vol_time = self.last_command_time.get('volume', 0)
                     if current_time - last_vol_time > 0.3:  # 300ms debounce
                         self.last_command_time['volume'] = current_time
+                        if self._aux1_prefix_pending(f'eng{engine}'):
+                            self.blend_volume = max(0, self.blend_volume - self.volume_step)
+                            logger.info(f"🔧 AUX1+Numeric 4 → Blend Volume Down: {self.blend_volume}")
+                            return self.send_wtiu_command(f'v2{self.blend_volume}', engine)
                         self.master_volume = max(0, self.master_volume - self.volume_step)
                         logger.info(f" Legacy Numeric 4 → Volume Down: {self.master_volume}")
                         return self.send_wtiu_command(f'v0{self.master_volume}')  # v0 = master volume
@@ -3693,8 +3717,6 @@ class LionelMTHBridge:
 
             # Sound system on/off -> MTH engine-sound volume channel (v1)
             elif command.get('type') == 'sound_system':
-                if not hasattr(self, '_engine_sound_vol'):
-                    self._engine_sound_vol = {}
                 if command.get('value') == 'off':
                     logger.info(f"🔇 Sound system OFF for engine {engine} -> v10")
                     return self.send_wtiu_command('v10')
@@ -3729,8 +3751,6 @@ class LionelMTHBridge:
             # assignment and swallow so ~500 CAB3 repeats stop spamming Unknown.
             elif command.get('type') == 'train_assign':
                 train_id = command.get('value', 0)
-                if not hasattr(self, '_train_assignments'):
-                    self._train_assignments = {}
                 if self._train_assignments.get(engine) != train_id:
                     self._train_assignments[engine] = train_id
                     logger.info(f"🔗 Engine {engine} assigned to TR{train_id}")
@@ -3785,12 +3805,10 @@ class LionelMTHBridge:
                     logger.info(f"🔊 Effects {value} -> v0{self.master_volume}")
                     return self.send_wtiu_command(f'v0{self.master_volume}')
                 elif value in ('blend_up', 'blend_down'):
-                    if not hasattr(self, '_blend_volume'):
-                        self._blend_volume = 50
                     step = self.volume_step if value == 'blend_up' else -self.volume_step
-                    self._blend_volume = max(0, min(100, self._blend_volume + step))
-                    logger.info(f"🔊 Effects {value} -> v2{self._blend_volume}")
-                    return self.send_wtiu_command(f'v2{self._blend_volume}')
+                    self.blend_volume = max(0, min(100, self.blend_volume + step))
+                    logger.info(f"🔊 Effects {value} -> v2{self.blend_volume}")
+                    return self.send_wtiu_command(f'v2{self.blend_volume}')
                 elif value in ('coupler_compress', 'coupler_stretch'):
                     logger.info(f"🔗 Effects {value} -> h1 for engine {engine}")
                     return self.send_wtiu_command('h1')
@@ -5457,16 +5475,28 @@ class LionelMTHBridge:
                 self.send_lashup_command(mth_id, 'm24', train_id)
             return
         
-        # 0x111 = Button 1 (Volume Up)
+        # 0x111 = Button 1 (Volume Up) - AUX1-prefixed = blend volume
         if cmd_code == 0x111:
+            if self._aux1_prefix_pending(f'tr{train_id}'):
+                new_vol = min(100, self._lashup_blend_volume.get(train_id, 50) + self.volume_step)
+                self._lashup_blend_volume[train_id] = new_vol
+                logger.info(f"🚂 TR{train_id} blend volume up -> MTH lashup {mth_id} v2 {new_vol}%")
+                self.send_lashup_command(mth_id, f"v2{new_vol}", train_id)
+                return
             current_vol = self._lashup_volume.get(train_id, 50)  # Default 50%
             new_vol = min(100, current_vol + self.volume_step)
             self._lashup_volume[train_id] = new_vol
             logger.info(f"🚂 TR{train_id} volume up -> MTH lashup {mth_id} vol {new_vol}%")
             self.send_lashup_command(mth_id, f"v0{new_vol}", train_id)  # Master volume
             return
-        # 0x114 = Button 4 (Volume Down)
+        # 0x114 = Button 4 (Volume Down) - AUX1-prefixed = blend volume
         if cmd_code == 0x114:
+            if self._aux1_prefix_pending(f'tr{train_id}'):
+                new_vol = max(0, self._lashup_blend_volume.get(train_id, 50) - self.volume_step)
+                self._lashup_blend_volume[train_id] = new_vol
+                logger.info(f"🚂 TR{train_id} blend volume down -> MTH lashup {mth_id} v2 {new_vol}%")
+                self.send_lashup_command(mth_id, f"v2{new_vol}", train_id)
+                return
             current_vol = self._lashup_volume.get(train_id, 50)  # Default 50%
             new_vol = max(0, current_vol - self.volume_step)
             self._lashup_volume[train_id] = new_vol
@@ -5482,16 +5512,12 @@ class LionelMTHBridge:
             logger.info(f"🚂 TR{train_id} quick shutdown (btn 5) -> MTH lashup {mth_id}")
             self.send_lashup_command(mth_id, "u5", train_id)
             return
-        # 0x109 = AUX1 (Quick Startup) - debounce to prevent flooding
+        # 0x109 = AUX1 - modal prefix for blend volume. Defer the quick
+        # startup: if 0x111/0x114 follows within AUX1_PREFIX_WINDOW it was
+        # a blend press. The lionel_listener sweep fires u4 on expiry.
         if cmd_code == 0x109:
-            last_startup = self._lashup_startup_debounce.get(train_id, 0)
-            if time.time() - last_startup < 2.0:  # 2 second debounce
-                return
-            self._lashup_startup_debounce[train_id] = time.time()
-            logger.info(f"🚂 TR{train_id} quick startup (AUX1) -> MTH lashup {mth_id}")
-            # Send U command to create lashup on WTIU (like Mark's RTC does on startup)
-            self._ensure_lashup_created_on_wtiu(train_id, mth_id)
-            self.send_lashup_command(mth_id, "u4", train_id)
+            self._aux1_prefix[f'tr{train_id}'] = time.time()
+            logger.debug(f"🚂 TR{train_id} AUX1 prefix (startup deferred)")
             return
         # 0x105 = Rear Coupler (Lionel)
         if cmd_code == 0x105:
@@ -6011,8 +6037,8 @@ class LionelMTHBridge:
                 logger.info(f"🔧 DEBUG: Direction toggled from {current_dir} to {new_dir}")
                 return cmd_map['direction'][new_dir]
             elif cmd_type == 'function' and cmd_value in ['volume_up', 'volume_down']:
-                # Handle volume commands
-                return self.convert_volume(cmd_value)
+                # Handle volume commands (AUX1-prefixed = blend volume)
+                return self.convert_volume(cmd_value, command.get('engine', self.current_lionel_engine))
             elif cmd_type == 'function' and cmd_value == 'pfa':
                 # PFA - Passenger/Freight Announcements (Keypad 2)
                 # First press: u1 to start, subsequent: m24 to advance
@@ -6181,17 +6207,29 @@ class LionelMTHBridge:
         logger.warning(f"⚠️ Unknown command: {cmd_type}:{cmd_value}")
         return None
     
-    def convert_volume(self, direction):
+    def convert_volume(self, direction, engine=None):
         """Convert volume up/down to absolute volume command"""
         try:
-            if direction == 'volume_up':
-                self.master_volume = min(100, self.master_volume + self.volume_step)
-            elif direction == 'volume_down':
-                self.master_volume = max(0, self.master_volume - self.volume_step)
-            else:
+            if direction not in ('volume_up', 'volume_down'):
                 logger.warning(f"⚠️ Unknown volume direction: {direction}")
                 return None
-            
+            up = direction == 'volume_up'
+
+            # AUX1-prefixed volume keys adjust blend/background volume (v2)
+            eng = engine if engine is not None else self.current_lionel_engine
+            if self._aux1_prefix_pending(f'eng{eng}'):
+                if up:
+                    self.blend_volume = min(100, self.blend_volume + self.volume_step)
+                else:
+                    self.blend_volume = max(0, self.blend_volume - self.volume_step)
+                logger.info(f"🔧 DEBUG: Blend Volume {direction} -> {self.blend_volume}%")
+                return f"v2{self.blend_volume}"
+
+            if up:
+                self.master_volume = min(100, self.master_volume + self.volume_step)
+            else:
+                self.master_volume = max(0, self.master_volume - self.volume_step)
+
             logger.info(f"🔧 DEBUG: Volume {direction} -> {self.master_volume}%")
             return f"v0{self.master_volume}"
         except Exception as e:
@@ -6309,6 +6347,48 @@ class LionelMTHBridge:
         
         logger.info("🔍 WTIU debug complete")
     
+    def _aux1_prefix_pending(self, key):
+        """Consume a pending AUX1 modal prefix if still inside the window.
+
+        Returns True (and clears the flag) when key ('eng<N>'/'tr<N>') had an
+        AUX1 press within AUX1_PREFIX_WINDOW - meaning the command being
+        processed is a blend-volume press, not related to quick-startup.
+        Expired flags are left for the lionel_listener sweep to fire u4.
+        """
+        ts = self._aux1_prefix.get(key)
+        if ts is not None and time.time() - ts <= AUX1_PREFIX_WINDOW:
+            del self._aux1_prefix[key]
+            return True
+        return False
+
+    def _service_aux1_prefixes(self):
+        """Fire deferred quick-startups whose AUX1 prefix window expired.
+
+        Called every lionel_listener iteration: a lone 0x109 (real startup
+        press) produces u4 ~0.8s late; a blend press consumes the flag first
+        so no startup is ever emitted.
+        """
+        now = time.time()
+        for key in [k for k, t in self._aux1_prefix.items() if now - t > AUX1_PREFIX_WINDOW]:
+            del self._aux1_prefix[key]
+            if key.startswith('eng'):
+                eng = int(key[3:])
+                # Match the dispatch path: suppress while an extended startup
+                # sequence is in progress, and debounce repeated startups.
+                if now - self.last_extended_startup_time.get(eng, 0) >= self.extended_command_cooldown \
+                        and now - self._startup_debounce.get(eng, 0) >= 5.0:
+                    self._startup_debounce[eng] = now
+                    logger.info(f"🚂 AUX1 Startup for engine {eng}")
+                    self.send_wtiu_command('u4', eng)
+            elif key.startswith('tr'):
+                tr = int(key[2:])
+                mth_id = self.lashup_manager.get_mth_id_for_tr(tr)
+                if mth_id and now - self._lashup_startup_debounce.get(tr, 0) >= 2.0:
+                    self._lashup_startup_debounce[tr] = now
+                    logger.info(f"🚂 TR{tr} quick startup (AUX1) -> MTH lashup {mth_id}")
+                    self._ensure_lashup_created_on_wtiu(tr, mth_id)
+                    self.send_lashup_command(mth_id, 'u4', tr)
+
     def lionel_listener(self):
         """Listen for TMCC packets from Lionel Base 3"""
         logger.info("🎯 Monitoring Lionel Base 3 for TMCC packets...")
@@ -6317,6 +6397,7 @@ class LionelMTHBridge:
         
         while self.running:
             try:
+                self._service_aux1_prefixes()
                 with self.lionel_lock:
                     if self.lionel_serial and self.lionel_serial.is_open:
                         # Check for any data in the buffer
@@ -6464,6 +6545,13 @@ class LionelMTHBridge:
                                         if self.send_to_mth_with_legacy(command):
                                             logger.info("✅ Legacy → MTH")
                                     else:
+                                        # TMCC1 AUX1 option1 (0x09) is a modal
+                                        # prefix too - defer startup like the
+                                        # Legacy path so AUX1+volume = blend.
+                                        if command.get('type') == 'engine' and command.get('value') == 'startup':
+                                            eng = command.get('engine', self.current_lionel_engine)
+                                            self._aux1_prefix[f'eng{eng}'] = time.time()
+                                            continue
                                         # TMCC1 - convert once and send directly
                                         mth_cmd = self.convert_to_mth_protocol(command)
                                         if mth_cmd:
@@ -7343,7 +7431,7 @@ def test_connection_manually():
     else:
         logger.error("❌ Failed to connect to MTH WTIU")
 
-BRIDGE_VERSION = "v1.7.10"
+BRIDGE_VERSION = "v1.7.11"
 
 def main():
     print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")
