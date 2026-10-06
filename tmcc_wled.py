@@ -39,7 +39,6 @@ from __future__ import annotations
 import http.client
 import json
 import logging
-import os
 import random
 import threading
 import time
@@ -209,7 +208,6 @@ class DaylightCycle:
         keyframes: dict[int, tuple[int, int, int]] | None = None,
         update_interval: float = 1.0,
         thunder_callback: Callable[[float], None] | None = None,  # Called after lightning with delay_ms
-        state_file: str | None = None,  # Persist storm-night count across restarts
     ) -> None:
         self.client = client
         self.cycle_duration = cycle_duration_sec
@@ -220,11 +218,10 @@ class DaylightCycle:
         self.keyframes = keyframes or self.DEFAULT_KEYFRAMES
         self.update_interval = update_interval
         self.thunder_callback = thunder_callback
-        self.state_file = state_file
 
         self._running = False
         self._thread: threading.Thread | None = None
-        self._cycle_count = self._load_state()
+        self._cycle_count = 0
         self._run_base = 0  # virtual midnights counted before this run
         self._start_time = 0.0
         self._last_lightning_time = 0.0
@@ -233,28 +230,6 @@ class DaylightCycle:
         
         # Register reconnect callback with client
         self.client._on_reconnect = self._on_reconnect
-
-    def _load_state(self) -> int:
-        """Load persisted cycle count (storm cadence survives restarts)."""
-        if not self.state_file:
-            return 0
-        try:
-            if os.path.exists(self.state_file):
-                with open(self.state_file, encoding='utf-8') as f:
-                    return int(json.load(f).get('cycle_count', 0))
-        except Exception as e:
-            logger.warning(f"Could not load daylight state: {e}")
-        return 0
-
-    def _save_state(self) -> None:
-        if not self.state_file:
-            return
-        try:
-            os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
-            with open(self.state_file, 'w', encoding='utf-8') as f:
-                json.dump({'cycle_count': self._cycle_count}, f)
-        except Exception as e:
-            logger.warning(f"Could not save daylight state: {e}")
     
     def _on_reconnect(self) -> None:
         """Called when WLED connection is restored after dropout."""
@@ -519,7 +494,6 @@ class DaylightCycle:
             total_cycles = self._run_base + int(elapsed // self.cycle_duration)
             if total_cycles > self._cycle_count:
                 self._cycle_count = total_cycles
-                self._save_state()
                 logger.info("Daylight cycle #%d started", self._cycle_count)
 
             sky_color = self._get_sky_color(virtual_hour)
@@ -542,6 +516,9 @@ class DaylightCycle:
             "mainseg": 0,
             "seg": [{"id": 0, "start": 0, "stop": self.led_count, "on": True}]
         })
+        # Each remote-triggered start begins a fresh storm sequence (night 0),
+        # so lightning_every_n_cycles counts forward from this session start.
+        self._cycle_count = 0
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -551,6 +528,7 @@ class DaylightCycle:
         self._running = False
         if self._thread:
             self._thread.join(timeout=2)
+        self._cycle_count = 0
         logger.info("Daylight cycle stopped")
 
 
@@ -572,7 +550,6 @@ class WLEDController:
         lightning_every_n_cycles: int = 3,
         thunder_callback: Callable[[float], None] | None = None,
         auto_start_daylight: bool = False,
-        state_file: str | None = None,
     ) -> None:
         self.mapping = mapping
         self.client = WLEDClient(host=host, port=port, timeout=timeout)
@@ -590,7 +567,6 @@ class WLEDController:
                 moon_length=moon_length,
                 lightning_every_n_cycles=lightning_every_n_cycles,
                 thunder_callback=thunder_callback,
-                state_file=state_file,
             )
             # Only auto-start if explicitly requested (default: False)
             # This allows the bridge to turn LEDs off first on startup
