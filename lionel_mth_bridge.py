@@ -2459,6 +2459,9 @@ class LionelMTHBridge:
                     lightning_every_n_cycles=wled_cfg.get('lightning_every_n_cycles', 3),
                     thunder_callback=thunder_cb,
                     auto_start_daylight=False,  # Never auto-start; user must trigger via TMCC command
+                    # Persist storm cadence across service restarts so
+                    # lightning_every_n_cycles actually means every Nth night
+                    state_file=os.path.join(os.path.expanduser('~/.lionel-mth-bridge'), 'wled_state.json'),
                 )
                 # Turn LEDs off on startup (user must explicitly start daylight cycle)
                 if wled_cfg.get('off_on_startup', True):
