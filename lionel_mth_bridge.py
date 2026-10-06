@@ -7434,7 +7434,7 @@ def test_connection_manually():
     else:
         logger.error("❌ Failed to connect to MTH WTIU")
 
-BRIDGE_VERSION = "v1.7.11"
+BRIDGE_VERSION = "v1.7.12"
 
 def main():
     print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")
