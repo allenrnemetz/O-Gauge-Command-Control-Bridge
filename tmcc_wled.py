@@ -379,7 +379,9 @@ class DaylightCycle:
         night that started the previous cycle, not the newly-started cycle.
         """
         night_index = self._cycle_count - 1 if virtual_hour < self.STORM_STOP else self._cycle_count
-        if self.lightning_every_n <= 1:
+        if self.lightning_every_n <= 0:
+            return False  # 0 disables storms entirely
+        if self.lightning_every_n == 1:
             return True
         return night_index % self.lightning_every_n == 0
 

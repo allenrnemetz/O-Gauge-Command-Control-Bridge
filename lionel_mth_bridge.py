@@ -192,7 +192,7 @@ class Config:
                 "led_count": 318,
                 "moon_start": 0,
                 "moon_length": 5,
-                "lightning_every_n_cycles": 0,
+                "lightning_every_n_cycles": 3,
                 "sound_dir": "/home/arnemetz/Layout Sounds",
                 "audio_device": "plughw:2,0",
                 "thunder_enabled": True,
