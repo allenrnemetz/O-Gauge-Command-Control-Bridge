@@ -3576,7 +3576,19 @@ class LionelMTHBridge:
             elif command.get('type') == 'numeric':
                 num = command.get('value', 0)
                 current_time = time.time()
-                
+
+                # CAB Reset key = Numeric 0 (0x110) -> MTH feature reset F0
+                if num == 0:
+                    engine = command.get('engine', self.current_lionel_engine)
+                    if not hasattr(self, '_reset_debounce'):
+                        self._reset_debounce = {}
+                    last_reset = self._reset_debounce.get(engine, 0)
+                    if current_time - last_reset < 2.0:  # remotes repeat while held
+                        return True
+                    self._reset_debounce[engine] = current_time
+                    logger.info(f"🔧 Reset (Numeric 0) → Engine {engine} Feature Reset: F0")
+                    return self.send_wtiu_command('F0', engine)
+
                 # CAB3 uses Numeric 1 for volume up (with debouncing)
                 if num == 1:
                     last_vol_time = self.last_command_time.get('volume', 0)
@@ -5576,10 +5588,10 @@ class LionelMTHBridge:
             logger.info(f"🚂 TR{train_id} headlight {'ON' if new_state else 'OFF'} (AUX2) -> MTH lashup {mth_id}: {mth_cmd}")
             self.send_lashup_command(mth_id, mth_cmd, train_id)
             return
-        # 0x110 = Button 0 (Engine Reset)
+        # 0x110 = Button 0 (Engine Reset) -> MTH feature reset
         if cmd_code == 0x110:
-            logger.info(f"🚂 TR{train_id} engine reset (btn 0) -> MTH lashup {mth_id}")
-            # No direct MTH equivalent for engine reset in lashup mode
+            logger.info(f"🚂 TR{train_id} engine reset (btn 0) -> MTH lashup {mth_id}: F0")
+            self.send_lashup_command(mth_id, 'F0', train_id)
             return
         # 0x118 = Button 8 (Smoke Down) — cycle: high->med->low->off
         if cmd_code == 0x118:
@@ -6129,9 +6141,9 @@ class LionelMTHBridge:
                 logger.info(f"💬 Crew Talk: Engine {engine} → {'ON' if new_state else 'OFF'} ({mth_cmd})")
                 return mth_cmd
             elif cmd_type == 'function' and cmd_value == 'numeric_0':
-                # Numeric 0 (Keypad 0) - idle sound 0
-                logger.info("🔊 Numeric 0: i0")
-                return 'i0'
+                # Keypad 0 = Reset key -> MTH feature reset
+                logger.info("🔧 Numeric 0 (Reset) -> F0")
+                return 'F0'
             elif cmd_type == 'function' and cmd_value == 'smoke_up':
                 # TMCC1 Smoke On (Keypad 9): simple on/off — no level cycling
                 engine = self.current_lionel_engine
@@ -7431,7 +7443,7 @@ def test_connection_manually():
     else:
         logger.error("❌ Failed to connect to MTH WTIU")
 
-BRIDGE_VERSION = "v1.7.12"
+BRIDGE_VERSION = "v1.7.13"
 
 def main():
     print(f"🎯 Lionel Base 3 → MTH WTIU Bridge {BRIDGE_VERSION}")
