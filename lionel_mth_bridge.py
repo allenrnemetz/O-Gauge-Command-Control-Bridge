@@ -2659,6 +2659,7 @@ class LionelMTHBridge:
         self._lashup_current_speed = {}
         self._lashup_direction_states = {}
         self._lashup_tmcc_speed = {}
+        self._last_consist_activity = 0.0  # time of last consist-programming packet
         self._lashup_direction_debounce = {}
         self._lashup_speed_throttle = {}
         self._lashup_bell_states = {}
@@ -3785,6 +3786,13 @@ class LionelMTHBridge:
             # after 60s of inactivity.
             elif command.get('type') == 'dialog':
                 current_time = time.time()
+
+                # During consist programming the Base 3 emits dialog packets
+                # (e.g. 0x58) as CAB prompts - they aren't PFA requests, so
+                # don't forward them to the MTH engines.
+                if current_time - self._last_consist_activity < 15.0:
+                    logger.info(f"💬 Dialog 0x{command.get('value', 0):02x} suppressed during consist programming (engine {engine})")
+                    return True
                 last_pfa_time = self.pfa_direction.get(engine, 0)
                 pfa_active = self.pfa_state.get(engine, False)
 
@@ -4985,9 +4993,18 @@ class LionelMTHBridge:
                         # NOTE: Removed I0 roster pre-check - Mark's code doesn't do this
                         # The I0 roster is unreliable and was blocking lashup creation
                         # Just send the U command directly like Mark's RTC does
-                        
+
                         logger.info(f"🔗 Creating MTH lashup (attempt {attempt + 1}/{max_retries})")
-                        
+
+                        # Select the lashup's DCS address before U. Mark's RTC sends
+                        # 'y<Consist+1>' (y102) before any command when the selected
+                        # engine changes - without it the WTIU doesn't know which
+                        # lashup slot the U targets and responds DCS timeout/overrun.
+                        # (Comm_Thread.cpp: SendWTIUString(TIU, "y" + (Consist + 1)))
+                        self.mth_socket.send(f"y{MTH_LASHUP_DCS_NO}\r\n".encode('latin-1'))
+                        self._last_selected_engine = MTH_LASHUP_DCS_NO
+                        time.sleep(0.1)
+
                         # Small delay after buffer flush before sending command
                         time.sleep(0.2)
                         
@@ -5089,6 +5106,7 @@ class LionelMTHBridge:
         if cmd_type == 'consist':
             train_id = command.get('train_id', 0)
             logger.info(f"🔗 Lashup command detected: {cmd_value} for TR{train_id}")
+            self._last_consist_activity = time.time()  # programming in progress
             
             if cmd_value == 'clear' and train_id > 0:
                 # Clear command received - break up MTH lashup properly
@@ -5111,6 +5129,12 @@ class LionelMTHBridge:
                 self.queried_trains.discard(train_id)
                 # Cancel any pending query
                 self.pending_train_queries.discard(train_id)
+                # Reset per-train direction/speed state so the next consist
+                # gets a fresh direction bootstrap (stale state survives
+                # service uptime and skips the d0/d1 on first speed)
+                self._lashup_direction_states.pop(train_id, None)
+                self._lashup_current_speed.pop(train_id, None)
+                self._lashup_tmcc_speed.pop(train_id, None)
                 return True
             
             if cmd_value == 'assign' and train_id > 0:
@@ -5188,41 +5212,22 @@ class LionelMTHBridge:
             # Ensure the lashup has a direction set before sending speed.
             # The Base 3 may send speed without an explicit direction command,
             # and MTH engines default to whatever direction they were last in.
-            # Use the direction from the consist assignment (single_fwd, head_rev, etc.)
-            # if available; otherwise default to forward.
             if not hasattr(self, '_lashup_direction_states'):
                 self._lashup_direction_states = {}
             if train_id not in self._lashup_direction_states:
-                direction = 0  # Default forward
-                consist_dir = getattr(self, '_consist_engine_direction', {})
-
-                # Gather all Lionel engine IDs associated with this TR.
-                # For multi-engine lashups, lashup_engines is populated.
-                # For single-engine TRs, check pending_consist_engines and
-                # the reverse MTH→Lionel mapping.
-                candidate_engines = set(self.lashup_manager.lashup_engines.get(train_id, []))
-                pending = getattr(self, '_pending_consist_engines', {}).get(train_id, {})
-                candidate_engines.update(pending.keys())
-                # Also check MTH engines in lashup — strip direction bit and
-                # reverse-map to Lionel IDs
-                for mth_id_with_dir in self.lashup_manager.mth_engines_in_lashup.get(train_id, []):
-                    mth_id_clean = mth_id_with_dir & 0x7F
-                    for lionel_id, mapped_mth in self.discovered_mth_engines.items():
-                        if mapped_mth == mth_id_clean:
-                            candidate_engines.add(int(lionel_id))
-
-                for eng in candidate_engines:
-                    if eng in consist_dir:
-                        direction = consist_dir[eng]
-                        logger.info(f"🚂 TR{train_id} direction from consist: engine {eng} -> {'REV' if direction else 'FWD'}")
-                        break
-                else:
-                    logger.info(f"🚂 TR{train_id} no consist direction found — defaulting to FWD")
-                if direction == 0:
-                    self.send_lashup_command(mth_id, "d0", train_id)
-                else:
-                    self.send_lashup_command(mth_id, "d1", train_id)
+                # Consist direction is the train's travel direction - member
+                # facing is already encoded as 0x80 flags in the |cmd,list
+                # engine list, so multi-engine lashups always start FORWARD.
+                # Only a single-engine TR needs explicit REV: send_lashup_command
+                # strips the flag byte when it drops to the direct-engine path.
+                mth_members = self.lashup_manager.mth_engines_in_lashup.get(train_id, [])
+                direction = 1 if len(mth_members) == 1 and (mth_members[0] & 0x80) else 0
+                logger.info(f"🚂 TR{train_id} initial consist direction -> {'REV' if direction else 'FWD'}")
+                self.send_lashup_command(mth_id, f"d{direction}", train_id)
                 self._lashup_direction_states[train_id] = direction
+                # Also kick off the U command if the lashup isn't on the WTIU
+                # yet - covers restored lashups run without a startup press
+                self._ensure_lashup_created_on_wtiu(train_id, mth_id)
 
             # Convert Legacy 200-step to DCS 120-step (calibration curve if available)
             dcs_speed = self.calibration_curves.convert_legacy_to_dcs(legacy_speed)
@@ -6755,7 +6760,7 @@ class LionelMTHBridge:
                     train_id = buf[i+5]  # Train ID is in byte 5
                     
                     logger.info(f"📡 TRAIN_ADDRESS: Engine {engine_id} -> Train {train_id}")
-                    
+                    self._last_consist_activity = time.time()
                     # Initialize train entry if needed
                     if train_id not in self._pending_consist_engines:
                         self._pending_consist_engines[train_id] = {}
@@ -6788,7 +6793,7 @@ class LionelMTHBridge:
                     dir_names = {0: 'FWD', 1: 'REV'}
                     
                     logger.info(f"📡 TRAIN_UNIT: Engine {engine_id} = {pos_names.get(position, '?')}_{dir_names.get(direction, '?')}")
-                    
+                    self._last_consist_activity = time.time()
                     # Find which train this engine belongs to and update position
                     for train_id, engines in self._pending_consist_engines.items():
                         if engine_id in engines:
@@ -6864,6 +6869,19 @@ class LionelMTHBridge:
             
             # Use lashup manager to create the lashup
             self.lashup_manager.update_lashup(train_id, components)
+
+            # Fresh consist = fresh direction/speed state so the first run
+            # command re-sends d0/d1 (stale state would skip the bootstrap)
+            self._lashup_direction_states.pop(train_id, None)
+            self._lashup_current_speed.pop(train_id, None)
+            self._lashup_tmcc_speed.pop(train_id, None)
+
+            # Register the lashup on the WTIU now (background thread) instead
+            # of waiting for a startup press - the U command is what stores
+            # member orientation (0x80 reverse flags) on the WTIU side.
+            mth_lashup_id = self.lashup_manager.get_mth_id_for_tr(train_id)
+            if mth_lashup_id:
+                self._ensure_lashup_created_on_wtiu(train_id, mth_lashup_id)
 
             # Store per-engine direction from consist assignment so the
             # lashup speed handler can send d0/d1 before the first speed.
